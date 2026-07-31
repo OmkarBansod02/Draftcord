@@ -12,6 +12,7 @@ const validAttachment: DiscordAttachment = {
   id: "attachment-1",
   filename: "proposal.docx",
   size: 1024,
+  url: "https://cdn.discordapp.com/attachments/proposal.docx",
   content_type: DOCX_MIME_TYPE
 };
 

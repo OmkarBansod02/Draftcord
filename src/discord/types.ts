@@ -2,6 +2,7 @@ export interface DiscordAttachment {
   id: string;
   filename: string;
   size: number;
+  url: string;
   content_type?: string;
 }
 

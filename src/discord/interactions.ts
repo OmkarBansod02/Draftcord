@@ -1,6 +1,15 @@
 import type { RequestHandler } from "express";
 import type { Logger } from "pino";
 
+import {
+  DocumentIngestionError,
+  ingestDocument
+} from "../documents/document-ingestion.js";
+import { createDocumentStorage } from "../documents/document-storage.js";
+import {
+  sanitizeFilenameForDisplay,
+  sanitizeTextForDisplay
+} from "../documents/filename-safety.js";
 import { editOriginalInteractionResponse } from "./api.js";
 import type {
   DiscordAttachment,
@@ -25,6 +34,7 @@ const EPHEMERAL_FLAG = 1 << 6;
 
 export interface InteractionHandlerConfig extends UploadAccessPolicy {
   applicationId: string;
+  storageDirectory?: string;
 }
 
 interface InteractionHandlerDependencies {
@@ -91,20 +101,25 @@ function getUploadData(interaction: DiscordInteraction):
 }
 
 function buildUploadSuccessMessage(
-  attachment: DiscordAttachment,
+  documentId: string,
+  originalFilename: string,
+  byteSize: number,
   title?: string
 ): string {
   const lines = [
-    "✅ Document metadata validation passed.",
-    `Filename: ${attachment.filename}`,
-    `File size: ${formatFileSize(attachment.size)}`
+    "✅ Document uploaded successfully.",
+    `Document ID: ${documentId}`,
+    `Original filename: ${sanitizeFilenameForDisplay(originalFilename)}`,
+    `File size: ${formatFileSize(byteSize)}`
   ];
 
   if (title) {
-    lines.push(`Title: ${title}`);
+    lines.push(`Title: ${sanitizeTextForDisplay(title)}`);
   }
 
-  lines.push("Document ingestion will happen in the next phase.");
+  lines.push("DOCX structure verified.");
+  lines.push("Original file stored safely.");
+  lines.push("SuperDocs ingestion will happen in Phase 3.");
   return lines.join("\n");
 }
 
@@ -112,6 +127,12 @@ export function createInteractionHandler({
   config,
   logger
 }: InteractionHandlerDependencies): RequestHandler {
+  const storage = createDocumentStorage({
+    ...(config.storageDirectory
+      ? { rootDirectory: config.storageDirectory }
+      : {})
+  });
+
   return (request, response) => {
     try {
       const interaction = request.body as DiscordInteraction;
@@ -190,7 +211,9 @@ export function createInteractionHandler({
         logger.info(
           {
             interactionId: interaction.id,
-            filename: uploadData.attachment.filename,
+            filename: sanitizeFilenameForDisplay(
+              uploadData.attachment.filename
+            ),
             size: uploadData.attachment.size,
             contentType: uploadData.attachment.content_type,
             reason: attachmentResult.error
@@ -217,31 +240,64 @@ export function createInteractionHandler({
         data: { flags: EPHEMERAL_FLAG }
       } satisfies DiscordInteractionResponse);
 
-      const successContent = buildUploadSuccessMessage(
-        uploadData.attachment,
-        uploadData.title
-      );
+      const interactionToken = interaction.token;
+      const uploadedByUserId = userId as string;
+      const uploadGuildId = interaction.guild_id as string;
+      const uploadChannelId = interaction.channel_id as string;
 
-      void editOriginalInteractionResponse({
-        applicationId: config.applicationId,
-        interactionToken: interaction.token,
-        content: successContent
-      })
-        .then(() => {
-          logger.info(
+      void (async () => {
+        let content: string;
+
+        try {
+          const stored = await ingestDocument(
             {
               interactionId: interaction.id,
-              filename: uploadData.attachment.filename,
-              size: uploadData.attachment.size,
-              hasTitle: Boolean(uploadData.title)
+              attachment: uploadData.attachment,
+              ...(uploadData.title ? { title: uploadData.title } : {}),
+              uploadedByUserId,
+              guildId: uploadGuildId,
+              channelId: uploadChannelId
             },
-            "Document upload metadata validated"
+            { logger, storage }
           );
-        })
-        .catch((error: unknown) => {
+
+          content = buildUploadSuccessMessage(
+            stored.documentId,
+            stored.metadata.originalFilename,
+            stored.metadata.byteSize,
+            stored.metadata.title
+          );
+        } catch (error) {
+          content = `❌ ${
+            error instanceof DocumentIngestionError
+              ? error.userMessage
+              : "Draftcord could not process this document."
+          }`;
+
+          if (!(error instanceof DocumentIngestionError)) {
+            logger.error(
+              {
+                interactionId: interaction.id,
+                processingStage: "ingestion",
+                errorCategory: "unexpected"
+              },
+              "Unexpected document ingestion failure"
+            );
+          }
+        }
+
+        try {
+          await editOriginalInteractionResponse({
+            applicationId: config.applicationId,
+            interactionToken,
+            content
+          });
+        } catch (error) {
           logger.error(
             {
               interactionId: interaction.id,
+              processingStage: "response_edit",
+              errorCategory: "discord_api_error",
               error:
                 error instanceof Error
                   ? error.message
@@ -249,7 +305,8 @@ export function createInteractionHandler({
             },
             "Failed to edit deferred Discord interaction response"
           );
-        });
+        }
+      })();
     } catch (error) {
       logger.error(
         {

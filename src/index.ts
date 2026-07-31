@@ -60,7 +60,10 @@ app.post(
       applicationId: configuredApplicationId,
       ownerUserId: configuredOwnerUserId,
       guildId: configuredGuildId,
-      documentChannelId: configuredDocumentChannelId
+      documentChannelId: configuredDocumentChannelId,
+      ...(process.env.DRAFTCORD_STORAGE_DIR
+        ? { storageDirectory: process.env.DRAFTCORD_STORAGE_DIR }
+        : {})
     },
     logger
   })
