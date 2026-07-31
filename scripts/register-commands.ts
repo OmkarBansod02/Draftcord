@@ -20,6 +20,27 @@ const commands = [
   new SlashCommandBuilder()
     .setName("ping")
     .setDescription("Check whether Draftcord is online")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("doc")
+    .setDescription("Work with Draftcord documents")
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("upload")
+        .setDescription("Validate a DOCX document for upload")
+        .addAttachmentOption((option) =>
+          option
+            .setName("file")
+            .setDescription("The DOCX document to upload")
+            .setRequired(true)
+        )
+        .addStringOption((option) =>
+          option
+            .setName("title")
+            .setDescription("An optional document title")
+            .setMaxLength(200)
+        )
+    )
     .toJSON()
 ];
 
@@ -34,4 +55,4 @@ await rest.put(
   }
 );
 
-console.log("Successfully registered /ping");
+console.log("Successfully registered /ping and /doc upload");
