@@ -10,16 +10,24 @@ import type { DocumentStorage } from "./document-storage.js";
 export const TERMINAL_EDIT_ACTIVITY_STATUSES = [
   "succeeded",
   "no_change",
-  "failed"
+  "failed",
+  "approved",
+  "rejected",
+  "review_failed",
+  "ambiguous"
 ] as const;
 
 export type TerminalEditActivityStatus =
   (typeof TERMINAL_EDIT_ACTIVITY_STATUSES)[number];
-export type EditActivityStatus = "started" | TerminalEditActivityStatus;
+export type EditActivityStatus =
+  | "started"
+  | "review_started"
+  | "proposal_ready"
+  | TerminalEditActivityStatus;
 
 export interface EditActivityRecord {
   activityId: string;
-  type: "document_edit";
+  type: "document_edit" | "document_review";
   discordMessageId: string;
   discordThreadId: string;
   requestedByUserId: string;
@@ -30,6 +38,8 @@ export interface EditActivityRecord {
   changesSummary?: string;
   changedSectionCount?: number;
   errorCategory?: string;
+  reviewId?: string;
+  decision?: "approved" | "rejected";
 }
 
 export type EditActivityState =
@@ -39,17 +49,24 @@ export type EditActivityState =
 
 const activitySchema = z.object({
   activityId: z.string().min(1).max(100),
-  type: z.literal("document_edit"),
+  type: z.enum(["document_edit", "document_review"]),
   discordMessageId: z.string().min(1).max(100),
   discordThreadId: z.string().min(1).max(100),
   requestedByUserId: z.string().min(1).max(100),
   instruction: z.string().max(2_000).optional(),
-  status: z.enum(["started", ...TERMINAL_EDIT_ACTIVITY_STATUSES]),
+  status: z.enum([
+    "started",
+    "review_started",
+    "proposal_ready",
+    ...TERMINAL_EDIT_ACTIVITY_STATUSES
+  ]),
   createdAt: z.string(),
   completedAt: z.string().optional(),
   changesSummary: z.string().max(1_000).optional(),
   changedSectionCount: z.number().int().nonnegative().optional(),
-  errorCategory: z.string().min(1).max(100).optional()
+  errorCategory: z.string().min(1).max(100).optional(),
+  reviewId: z.string().min(1).max(100).optional(),
+  decision: z.enum(["approved", "rejected"]).optional()
 });
 
 function activityPath(storage: DocumentStorage, documentId: string): string {
@@ -130,8 +147,9 @@ export function createEditActivityRepository({
           continue;
         }
         if (parsed.data.discordMessageId !== discordMessageId) continue;
-        if (parsed.data.status === "started") started = parsed.data;
-        else terminal = parsed.data;
+        if (["started", "review_started", "proposal_ready"].includes(parsed.data.status)) {
+          started = parsed.data;
+        } else terminal = parsed.data;
       }
 
       if (terminal) return { state: "terminal", record: terminal };

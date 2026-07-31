@@ -9,6 +9,8 @@ import {
 import path from "node:path";
 import { z } from "zod";
 
+import { EDIT_MODES, type EditMode } from "./edit-mode.js";
+
 export const DOCUMENT_STATUSES = [
   "stored",
   "superdocs_ingesting",
@@ -19,7 +21,11 @@ export const DOCUMENT_STATUSES = [
   "thread_failed",
   "thread_setup_failed",
   "editing",
-  "edit_failed"
+  "edit_failed",
+  "review_generating",
+  "awaiting_approval",
+  "approval_processing",
+  "review_failed"
 ] as const;
 
 export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
@@ -31,6 +37,7 @@ export interface DocumentMetadataInput {
   guildId: string;
   channelId: string;
   discordAttachmentId: string;
+  editMode?: EditMode;
 }
 
 export interface StoredDocumentMetadata extends DocumentMetadataInput {
@@ -50,6 +57,13 @@ export interface StoredDocumentMetadata extends DocumentMetadataInput {
   lastEditDiscordMessageId?: string;
   lastEditSummary?: string;
   lastEditErrorCategory?: string;
+  editMode: EditMode;
+  modeControlMessageId?: string;
+  pendingReviewId?: string;
+  pendingReviewMessageId?: string;
+  lastReviewDecision?: "approved" | "rejected";
+  lastReviewDecisionAt?: string;
+  lastReviewErrorCategory?: string;
 }
 
 export interface DocumentMetadataUpdate {
@@ -65,6 +79,13 @@ export interface DocumentMetadataUpdate {
   lastEditDiscordMessageId?: string;
   lastEditSummary?: string;
   lastEditErrorCategory?: string | null;
+  editMode?: EditMode;
+  modeControlMessageId?: string;
+  pendingReviewId?: string | null;
+  pendingReviewMessageId?: string | null;
+  lastReviewDecision?: "approved" | "rejected" | null;
+  lastReviewDecisionAt?: string | null;
+  lastReviewErrorCategory?: string | null;
 }
 
 export interface StoredDocument {
@@ -95,7 +116,7 @@ const storedDocumentMetadataSchema = z.object({
   channelId: z.string().min(1),
   discordAttachmentId: z.string().min(1),
   createdAt: z.string(),
-  updatedAt: z.string(),
+  updatedAt: z.string().optional(),
   status: z.enum(DOCUMENT_STATUSES),
   superdocsSessionId: z.string().min(1).optional(),
   superdocsDocumentId: z.string().min(1).optional(),
@@ -107,8 +128,20 @@ const storedDocumentMetadataSchema = z.object({
   lastEditedAt: z.string().optional(),
   lastEditDiscordMessageId: z.string().min(1).max(100).optional(),
   lastEditSummary: z.string().min(1).max(1_000).optional(),
-  lastEditErrorCategory: z.string().min(1).max(100).optional()
-});
+  lastEditErrorCategory: z.string().min(1).max(100).optional(),
+  editMode: z.enum(EDIT_MODES).optional(),
+  modeControlMessageId: z.string().min(1).max(100).optional(),
+  pendingReviewId: z.string().min(1).max(100).optional(),
+  pendingReviewMessageId: z.string().min(1).max(100).optional(),
+  lastReviewDecision: z.enum(["approved", "rejected"]).optional(),
+  lastReviewDecisionAt: z.string().optional(),
+  lastReviewErrorCategory: z.string().min(1).max(100).optional()
+}).transform((metadata) => ({
+  ...metadata,
+  updatedAt: metadata.updatedAt ?? metadata.createdAt,
+  // Phase 1-4 files intentionally remain untouched until their next real update.
+  editMode: metadata.editMode ?? "auto_apply"
+}));
 
 export class DocumentStorageError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -131,6 +164,22 @@ export function createDocumentStorage({
 }: DocumentStorageOptions = {}) {
   const storageRoot = path.resolve(rootDirectory);
   const documentsRoot = path.join(storageRoot, "documents");
+  const updateTails = new Map<string, Promise<StoredDocumentMetadata>>();
+
+  async function readMetadata(documentId: string): Promise<StoredDocumentMetadata> {
+    const documentDirectory = path.join(documentsRoot, documentId);
+    ensureContained(documentsRoot, documentDirectory);
+    const metadataPath = path.join(documentDirectory, "metadata.json");
+
+    try {
+      const rawMetadata = await readFile(metadataPath, "utf8");
+      return storedDocumentMetadataSchema.parse(JSON.parse(rawMetadata));
+    } catch (error) {
+      throw new DocumentStorageError("Document metadata could not be read", {
+        cause: error
+      });
+    }
+  }
 
   return {
     rootDirectory: storageRoot,
@@ -152,7 +201,7 @@ export function createDocumentStorage({
       const originalPath = path.join(finalDirectory, "original.docx");
       const metadataPath = path.join(finalDirectory, "metadata.json");
       const now = new Date().toISOString();
-      const metadata: StoredDocumentMetadata = {
+      const metadataToPersist = {
         documentId,
         originalFilename: input.originalFilename,
         ...(input.title ? { title: input.title } : {}),
@@ -163,8 +212,10 @@ export function createDocumentStorage({
         discordAttachmentId: input.discordAttachmentId,
         createdAt: now,
         updatedAt: now,
-        status: "stored"
+        status: "stored",
+        ...(input.editMode ? { editMode: input.editMode } : {})
       };
+      const metadata = storedDocumentMetadataSchema.parse(metadataToPersist);
 
       try {
         await mkdir(documentsRoot, { recursive: true, mode: 0o700 });
@@ -176,7 +227,7 @@ export function createDocumentStorage({
         );
         await writeFileImplementation(
           path.join(temporaryDirectory, "metadata.json"),
-          `${JSON.stringify(metadata, null, 2)}\n`,
+          `${JSON.stringify(metadataToPersist, null, 2)}\n`,
           { flag: "wx", mode: 0o600, encoding: "utf8" }
         );
         await rename(temporaryDirectory, finalDirectory);
@@ -198,20 +249,7 @@ export function createDocumentStorage({
       };
     },
 
-    async readMetadata(documentId: string): Promise<StoredDocumentMetadata> {
-      const documentDirectory = path.join(documentsRoot, documentId);
-      ensureContained(documentsRoot, documentDirectory);
-      const metadataPath = path.join(documentDirectory, "metadata.json");
-
-      try {
-        const rawMetadata = await readFile(metadataPath, "utf8");
-        return storedDocumentMetadataSchema.parse(JSON.parse(rawMetadata));
-      } catch (error) {
-        throw new DocumentStorageError("Document metadata could not be read", {
-          cause: error
-        });
-      }
-    },
+    readMetadata,
 
     async updateMetadata(
       documentId: string,
@@ -226,41 +264,40 @@ export function createDocumentStorage({
       );
       ensureContained(documentDirectory, temporaryMetadataPath);
 
-      try {
-        const current = await this.readMetadata(documentId);
-        const {
-          lastErrorCategory,
-          lastEditErrorCategory,
-          ...fields
-        } = update;
-        const next = storedDocumentMetadataSchema.parse({
-          ...current,
-          ...fields,
-          ...(lastErrorCategory === null
-            ? { lastErrorCategory: undefined }
-            : lastErrorCategory
-              ? { lastErrorCategory }
-              : {}),
-          ...(lastEditErrorCategory === null
-            ? { lastEditErrorCategory: undefined }
-            : lastEditErrorCategory
-              ? { lastEditErrorCategory }
-              : {}),
-          updatedAt: new Date().toISOString()
-        });
+      const previous = updateTails.get(documentId);
+      const readyForUpdate = previous
+        ? previous.then(() => undefined, () => undefined)
+        : Promise.resolve();
+      const nextUpdate = readyForUpdate.then(async () => {
+        try {
+          const current = await readMetadata(documentId);
+          const nextValue: Record<string, unknown> = { ...current };
+          for (const [key, value] of Object.entries(update)) {
+            if (value === null) delete nextValue[key];
+            else if (value !== undefined) nextValue[key] = value;
+          }
+          nextValue.updatedAt = new Date().toISOString();
+          const next = storedDocumentMetadataSchema.parse(nextValue);
 
-        await writeFileImplementation(
-          temporaryMetadataPath,
-          `${JSON.stringify(next, null, 2)}\n`,
-          { flag: "wx", mode: 0o600, encoding: "utf8" }
-        );
-        await rename(temporaryMetadataPath, metadataPath);
-        return next;
-      } catch (error) {
-        await rm(temporaryMetadataPath, { force: true }).catch(() => undefined);
-        throw new DocumentStorageError("Document metadata could not be updated", {
-          cause: error
-        });
+          await writeFileImplementation(
+            temporaryMetadataPath,
+            `${JSON.stringify(next, null, 2)}\n`,
+            { flag: "wx", mode: 0o600, encoding: "utf8" }
+          );
+          await rename(temporaryMetadataPath, metadataPath);
+          return next;
+        } catch (error) {
+          await rm(temporaryMetadataPath, { force: true }).catch(() => undefined);
+          throw new DocumentStorageError("Document metadata could not be updated", {
+            cause: error
+          });
+        }
+      });
+      updateTails.set(documentId, nextUpdate);
+      try {
+        return await nextUpdate;
+      } finally {
+        if (updateTails.get(documentId) === nextUpdate) updateTails.delete(documentId);
       }
     }
   };

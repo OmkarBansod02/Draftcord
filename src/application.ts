@@ -13,6 +13,12 @@ import { createDocumentStorage } from "./documents/document-storage.js";
 import { createDocumentWorkspaceRegistry } from "./documents/workspace-registry.js";
 import { createSuperDocsClient } from "./superdocs/client.js";
 import { createSuperDocsConfig } from "./superdocs/config.js";
+import { parseDefaultEditMode } from "./documents/edit-mode.js";
+import { createReviewStore } from "./documents/review-store.js";
+import { createSuperDocsReviewClient } from "./superdocs/review-client.js";
+import { createComponentInteractionHandler } from "./discord/component-interactions.js";
+import { reconcilePendingReviews } from "./documents/review-recovery.js";
+import { createDiscordRestClient } from "./discord/api.js";
 
 function requireEnvironment(): {
   publicKey: string;
@@ -64,6 +70,7 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
   }
 
   const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
+  const defaultEditMode = parseDefaultEditMode();
   const superdocsConfig = createSuperDocsConfig({
     apiKey: environment.superdocsApiKey,
     ...(process.env.SUPERDOCS_API_BASE_URL
@@ -84,10 +91,39 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
   const registry = createDocumentWorkspaceRegistry({ storage, logger });
   await registry.refresh();
   const activity = createEditActivityRepository({ storage, logger });
+  const reviewStore = createReviewStore({ storage, logger });
   const queue = createDocumentEditQueue({ maxPendingEdits: 5 });
   const superdocsClient = createSuperDocsClient({
     ...superdocsConfig,
     logger
+  });
+  const superdocsReviewClient = createSuperDocsReviewClient({
+    ...superdocsConfig,
+    logger
+  });
+  const discordClient = createDiscordRestClient({
+    botToken: environment.botToken
+  });
+  await reconcilePendingReviews({
+    storage,
+    registry,
+    reviewStore,
+    reviewClient: superdocsReviewClient,
+    logger
+  });
+  const componentHandler = createComponentInteractionHandler({
+    config: {
+      applicationId: environment.applicationId,
+      ownerUserId: environment.ownerUserId,
+      guildId: environment.guildId
+    },
+    logger,
+    storage,
+    registry,
+    reviewStore,
+    activity,
+    reviewClient: superdocsReviewClient,
+    discordClient
   });
 
   const app = express();
@@ -109,6 +145,7 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
         documentChannelId: environment.documentChannelId,
         botToken: environment.botToken,
         superdocs: superdocsConfig,
+        defaultEditMode,
         ...(process.env.DRAFTCORD_STORAGE_DIR
           ? { storageDirectory: process.env.DRAFTCORD_STORAGE_DIR }
           : {})
@@ -116,7 +153,9 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
       logger,
       superdocsClient,
       storage,
-      registry
+      registry,
+      discordClient,
+      componentHandler
     })
   );
 
@@ -133,7 +172,10 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
       registry,
       activity,
       queue,
-      superdocsClient
+      superdocsClient,
+      reviewStore,
+      reviewClient: superdocsReviewClient,
+      discordClient
     })
   });
 

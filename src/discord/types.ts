@@ -15,6 +15,7 @@ export interface DiscordInteractionOption {
 
 export interface DiscordInteraction {
   id?: string;
+  application_id?: string;
   type: number;
   token?: string;
   guild_id?: string;
@@ -29,10 +30,15 @@ export interface DiscordInteraction {
   };
   data?: {
     name?: string;
+    custom_id?: string;
+    component_type?: number;
     options?: DiscordInteractionOption[];
     resolved?: {
       attachments?: Record<string, DiscordAttachment>;
     };
+  };
+  message?: {
+    id?: string;
   };
 }
 
@@ -44,5 +50,6 @@ export interface DiscordInteractionResponse {
     allowed_mentions?: {
       parse: string[];
     };
+    components?: unknown[];
   };
 }

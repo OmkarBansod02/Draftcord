@@ -13,6 +13,13 @@ import type {
 } from "../documents/document-storage.js";
 import type { DocumentWorkspaceRegistry } from "../documents/workspace-registry.js";
 import {
+  createReviewMessageWorkflow,
+  type ReviewMessageWorkflow
+} from "../documents/review-workflow.js";
+import type { ReviewStore } from "../documents/review-store.js";
+import type { SuperDocsReviewClient } from "../superdocs/review-client.js";
+import type { DiscordComponentMessageClient } from "./api.js";
+import {
   SuperDocsClientError,
   type SuperDocsEditingClient
 } from "../superdocs/client.js";
@@ -34,6 +41,10 @@ export interface DocumentMessageHandlerDependencies {
   activity: EditActivityRepository;
   queue: DocumentEditQueue;
   superdocsClient: SuperDocsEditingClient;
+  reviewStore?: ReviewStore;
+  reviewClient?: SuperDocsReviewClient;
+  reviewWorkflow?: ReviewMessageWorkflow;
+  discordClient?: DiscordComponentMessageClient;
 }
 
 function safeText(value: string, maximumLength: number): string {
@@ -135,7 +146,23 @@ export function createDocumentMessageHandler({
   registry,
   activity,
   queue,
-  superdocsClient
+  superdocsClient,
+  reviewStore,
+  reviewClient,
+  discordClient,
+  reviewWorkflow = reviewStore && reviewClient
+    ? createReviewMessageWorkflow({
+        config,
+        logger,
+        storage,
+        registry,
+        activity,
+        queue,
+        reviewStore,
+        reviewClient,
+        discordClient
+      })
+    : undefined
 }: DocumentMessageHandlerDependencies): (message: Message) => void {
   const claimedMessageIds = new Set<string>();
 
@@ -450,6 +477,28 @@ export function createDocumentMessageHandler({
 
     const instruction = message.content.trim();
     if (!instruction) return;
+
+    if (metadata.editMode === "review") {
+      if (!reviewWorkflow) {
+        void safeReply(
+          message,
+          "⚠️ Review Mode is temporarily unavailable. No SuperDocs request was sent."
+        ).catch(() => undefined);
+        return;
+      }
+      if (
+        !metadata.superdocsSessionId ||
+        !["ready", "edit_failed", "review_failed"].includes(metadata.status)
+      ) {
+        const content = ["awaiting_approval", "approval_processing"].includes(metadata.status)
+          ? "⏳ Approve or reject the current proposal before sending another document edit."
+          : unavailableMessage(metadata);
+        void safeReply(message, content).catch(() => undefined);
+        return;
+      }
+      reviewWorkflow.submit(message, metadata, instruction);
+      return;
+    }
 
     if (claimedMessageIds.has(message.id)) {
       logger.info(

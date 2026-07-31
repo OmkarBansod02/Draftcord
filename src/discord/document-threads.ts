@@ -3,6 +3,7 @@ import {
   sanitizeTextForDisplay
 } from "../documents/filename-safety.js";
 import { formatFileSize } from "./upload-validation.js";
+import { displayEditMode, type EditMode } from "../documents/edit-mode.js";
 
 const MAX_THREAD_NAME_LENGTH = 100;
 
@@ -51,13 +52,15 @@ export function createWorkspaceWelcomeMessage({
   originalFilename,
   documentId,
   byteSize,
-  chunkCount
+  chunkCount,
+  editMode = "review"
 }: {
   title?: string;
   originalFilename: string;
   documentId: string;
   byteSize: number;
   chunkCount?: number;
+  editMode?: EditMode;
 }): string {
   const safeFilename = sanitizeDiscordNamePart(
     sanitizeFilenameForDisplay(originalFilename)
@@ -81,6 +84,12 @@ export function createWorkspaceWelcomeMessage({
 
   lines.push("");
   lines.push("The original DOCX has been verified and loaded into SuperDocs.");
-  lines.push("Natural-language editing will be connected in Phase 4.");
+  lines.push("Natural-language editing was connected in Phase 4.");
+  lines.push(`Editing mode: ${displayEditMode(editMode)}`);
+  lines.push(
+    editMode === "review"
+      ? "Review Mode holds proposed changes for explicit approval."
+      : "Auto Apply sends edits directly to the active SuperDocs session."
+  );
   return lines.join("\n");
 }

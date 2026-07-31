@@ -25,6 +25,8 @@ import type {
   StoredDocumentMetadata
 } from "./document-storage.js";
 import { sanitizeFilenameForDisplay } from "./filename-safety.js";
+import { DEFAULT_EDIT_MODE, type EditMode } from "./edit-mode.js";
+import { createModeComponents } from "../discord/review-components.js";
 
 export type WorkspaceFailureStage =
   | "superdocs_ingestion"
@@ -62,6 +64,7 @@ export interface DocumentWorkspaceDependencies
   discordClient: DiscordDocumentThreadClient;
   ownerUserId: string;
   documentChannelId: string;
+  defaultEditMode?: EditMode;
   onMetadataChanged?: (metadata: StoredDocumentMetadata) => void | Promise<void>;
 }
 
@@ -112,12 +115,13 @@ export async function createDocumentWorkspace(
     discordClient,
     ownerUserId,
     documentChannelId,
+    defaultEditMode = DEFAULT_EDIT_MODE,
     onMetadataChanged,
     download,
     verify
   }: DocumentWorkspaceDependencies
 ): Promise<DocumentWorkspaceResult> {
-  const stored = await ingestDocument(input, {
+  const stored = await ingestDocument({ ...input, editMode: defaultEditMode }, {
     logger,
     storage,
     ...(download ? { download } : {}),
@@ -358,16 +362,22 @@ export async function createDocumentWorkspace(
 
     setupOperation = "thread_message_create";
     startedAt = Date.now();
-    await discordClient.createThreadMessage(
+    const welcomeMessage = await discordClient.createThreadMessage(
       thread.threadId,
       createWorkspaceWelcomeMessage({
         title: stored.metadata.title,
         originalFilename: stored.metadata.originalFilename,
         documentId: stored.documentId,
         byteSize: stored.metadata.byteSize,
-        chunkCount: superdocs.chunkCount
-      })
+        chunkCount: superdocs.chunkCount,
+        editMode: defaultEditMode
+      }),
+      createModeComponents(stored.documentId, defaultEditMode)
     );
+    const controlMetadata = await storage.updateMetadata(stored.documentId, {
+      modeControlMessageId: welcomeMessage.id
+    });
+    await onMetadataChanged?.(controlMetadata);
     logger.info(
       {
         event: "discord_thread_message_created",

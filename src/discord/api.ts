@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { DiscordActionRow } from "./review-components.js";
+
 const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -58,7 +60,31 @@ export interface DiscordDocumentThreadClient {
     input: CreatePublicThreadInput
   ): Promise<CreatedDiscordThread>;
   addThreadMember(threadId: string, userId: string): Promise<void>;
-  createThreadMessage(threadId: string, content: string): Promise<{ id: string }>;
+  createThreadMessage(
+    threadId: string,
+    content: string,
+    components?: DiscordActionRow[]
+  ): Promise<{ id: string }>;
+  editThreadMessage?(
+    threadId: string,
+    messageId: string,
+    content: string,
+    components?: DiscordActionRow[]
+  ): Promise<void>;
+}
+
+export interface DiscordComponentMessageClient {
+  editThreadMessage(
+    threadId: string,
+    messageId: string,
+    content: string,
+    components?: DiscordActionRow[]
+  ): Promise<void>;
+  createThreadMessage(
+    threadId: string,
+    content: string,
+    components?: DiscordActionRow[]
+  ): Promise<{ id: string }>;
 }
 
 interface DiscordRestClientOptions {
@@ -150,7 +176,7 @@ export function createDiscordRestClient({
   fetchImplementation = fetch,
   apiBaseUrl = DISCORD_API_BASE_URL,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
-}: DiscordRestClientOptions): DiscordDocumentThreadClient {
+}: DiscordRestClientOptions): DiscordDocumentThreadClient & DiscordComponentMessageClient {
   return {
     async createPublicThread({
       channelId,
@@ -193,7 +219,8 @@ export function createDiscordRestClient({
 
     async createThreadMessage(
       threadId: string,
-      content: string
+      content: string,
+      components: DiscordActionRow[] = []
     ): Promise<{ id: string }> {
       const response = await discordFetch(
         fetchImplementation,
@@ -206,14 +233,68 @@ export function createDiscordRestClient({
           },
           body: JSON.stringify({
             content,
+            components,
             allowed_mentions: { parse: [] }
           })
         },
         requestTimeoutMs
       );
       return parseDiscordJson(response, messageResponseSchema);
+    },
+
+    async editThreadMessage(
+      threadId: string,
+      messageId: string,
+      content: string,
+      components: DiscordActionRow[] = []
+    ): Promise<void> {
+      const response = await discordFetch(
+        fetchImplementation,
+        `${apiBaseUrl}/channels/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bot ${botToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            content,
+            components,
+            allowed_mentions: { parse: [] }
+          })
+        },
+        requestTimeoutMs
+      );
+      await requireSuccess(response);
+      await response.body?.cancel().catch(() => undefined);
     }
   };
+}
+
+export async function sendInteractionFollowup({
+  applicationId,
+  interactionToken,
+  content,
+  ephemeral = true,
+  fetchImplementation = fetch,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+}: EditOriginalInteractionResponseOptions & { ephemeral?: boolean }): Promise<void> {
+  const response = await discordFetch(
+    fetchImplementation,
+    `${DISCORD_API_BASE_URL}/webhooks/${encodeURIComponent(applicationId)}/${encodeURIComponent(interactionToken)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content,
+        ...(ephemeral ? { flags: 1 << 6 } : {}),
+        allowed_mentions: { parse: [] }
+      })
+    },
+    requestTimeoutMs
+  );
+  await requireSuccess(response);
+  await response.body?.cancel().catch(() => undefined);
 }
 
 export async function editOriginalInteractionResponse({

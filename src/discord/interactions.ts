@@ -41,6 +41,8 @@ import {
   createSuperDocsConfig,
   type SuperDocsConfig
 } from "../superdocs/config.js";
+import type { EditMode } from "../documents/edit-mode.js";
+import type { ComponentInteractionHandler } from "./component-interactions.js";
 
 const APPLICATION_COMMAND = 2;
 const CHANNEL_MESSAGE_WITH_SOURCE = 4;
@@ -55,6 +57,7 @@ export interface InteractionHandlerConfig extends UploadAccessPolicy {
   botToken: string;
   superdocs: SuperDocsConfig;
   storageDirectory?: string;
+  defaultEditMode?: EditMode;
 }
 
 interface InteractionHandlerDependencies {
@@ -64,6 +67,7 @@ interface InteractionHandlerDependencies {
   discordClient?: DiscordDocumentThreadClient;
   storage?: DocumentStorage;
   registry?: Pick<DocumentWorkspaceRegistry, "register">;
+  componentHandler?: ComponentInteractionHandler;
 }
 
 function ephemeralError(content: string): DiscordInteractionResponse {
@@ -203,13 +207,32 @@ export function createInteractionHandler({
       ? { rootDirectory: config.storageDirectory }
       : {})
   }),
-  registry
+  registry,
+  componentHandler
 }: InteractionHandlerDependencies): RequestHandler {
   return (request, response) => {
     try {
       const interaction = request.body as DiscordInteraction;
       const commandName = interaction.data?.name;
       const userId = interaction.member?.user?.id ?? interaction.user?.id;
+
+      const component = componentHandler?.handle(interaction);
+      if (component) {
+        response.status(200).json(component.response);
+        if (component.afterResponse) {
+          queueMicrotask(() => void component.afterResponse?.().catch(() => {
+            logger.error(
+              {
+                event: "component_interaction_failed",
+                interactionId: interaction.id,
+                errorCategory: "component_background_failure"
+              },
+              "Component interaction background processing failed"
+            );
+          }));
+        }
+        return;
+      }
 
       logger.info(
         {
@@ -337,6 +360,9 @@ export function createInteractionHandler({
               discordClient,
               ownerUserId: config.ownerUserId,
               documentChannelId: config.documentChannelId,
+              ...(config.defaultEditMode
+                ? { defaultEditMode: config.defaultEditMode }
+                : {}),
               ...(registry
                 ? {
                     onMetadataChanged: (metadata) => {

@@ -134,10 +134,33 @@ describe("document workspace orchestration", () => {
     );
     expect(result.metadata).toMatchObject({
       status: "ready",
+      editMode: "review",
       superdocsSessionId: "draftcord-document-12345678",
       superdocsDocumentId: "superdocs-document-1",
       superdocsChunkCount: 7,
       discordThreadId: "thread-1"
+    });
+    const welcomeCall = vi.mocked(harness.discordClient.createThreadMessage).mock.calls[0];
+    expect(welcomeCall?.[1]).toContain("Editing mode: Review Mode");
+    expect(welcomeCall?.[2]?.[0]?.components).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "Review Mode", disabled: true })
+      ])
+    );
+  });
+
+  it("persists a configured auto_apply default for a new workspace", async () => {
+    const harness = await createHarness();
+    const result = await createDocumentWorkspace(harness.input, {
+      ...harness.dependencies,
+      defaultEditMode: "auto_apply"
+    });
+    expect(result.metadata.editMode).toBe("auto_apply");
+    const welcomeCall = vi.mocked(harness.discordClient.createThreadMessage).mock.calls[0];
+    expect(welcomeCall?.[1]).toContain("Editing mode: Auto Apply");
+    expect(welcomeCall?.[2]?.[0]?.components[0]).toMatchObject({
+      label: "Auto Apply",
+      disabled: true
     });
   });
 

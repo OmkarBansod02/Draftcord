@@ -12,6 +12,7 @@ import {
 } from "./document-storage.js";
 import { verifyDocx, InvalidDocxError } from "./docx-verifier.js";
 import { sanitizeFilenameForDisplay } from "./filename-safety.js";
+import type { EditMode } from "./edit-mode.js";
 
 export type DocumentIngestionErrorCategory =
   | "download_timeout"
@@ -41,6 +42,7 @@ export interface IngestDocumentInput {
   uploadedByUserId: string;
   guildId: string;
   channelId: string;
+  editMode?: EditMode;
 }
 
 export interface IngestionDependencies {
@@ -143,7 +145,8 @@ export async function ingestDocument(
         uploadedByUserId: input.uploadedByUserId,
         guildId: input.guildId,
         channelId: input.channelId,
-        discordAttachmentId: input.attachment.id
+        discordAttachmentId: input.attachment.id,
+        ...(input.editMode ? { editMode: input.editMode } : {})
       },
       documentId
     );

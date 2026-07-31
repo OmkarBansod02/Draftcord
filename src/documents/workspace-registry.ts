@@ -16,6 +16,8 @@ export interface WorkspaceRegistryRefreshResult {
 
 export interface DocumentWorkspaceRegistry {
   resolve(discordThreadId: string): StoredDocumentMetadata | undefined;
+  resolveDocument(documentId: string): StoredDocumentMetadata | undefined;
+  list(): StoredDocumentMetadata[];
   register(metadata: StoredDocumentMetadata): boolean;
   refresh(): Promise<WorkspaceRegistryRefreshResult>;
 }
@@ -68,6 +70,15 @@ export function createDocumentWorkspaceRegistry({
   return {
     resolve(discordThreadId) {
       return byThreadId.get(discordThreadId);
+    },
+
+    resolveDocument(documentId) {
+      const threadId = threadIdByDocumentId.get(documentId);
+      return threadId ? byThreadId.get(threadId) : undefined;
+    },
+
+    list() {
+      return [...byThreadId.values()];
     },
 
     register,
