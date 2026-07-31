@@ -17,7 +17,9 @@ export const DOCUMENT_STATUSES = [
   "ready",
   "superdocs_failed",
   "thread_failed",
-  "thread_setup_failed"
+  "thread_setup_failed",
+  "editing",
+  "edit_failed"
 ] as const;
 
 export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
@@ -43,6 +45,11 @@ export interface StoredDocumentMetadata extends DocumentMetadataInput {
   discordThreadId?: string;
   discordThreadName?: string;
   lastErrorCategory?: string;
+  editCount?: number;
+  lastEditedAt?: string;
+  lastEditDiscordMessageId?: string;
+  lastEditSummary?: string;
+  lastEditErrorCategory?: string;
 }
 
 export interface DocumentMetadataUpdate {
@@ -53,6 +60,11 @@ export interface DocumentMetadataUpdate {
   discordThreadId?: string;
   discordThreadName?: string;
   lastErrorCategory?: string | null;
+  editCount?: number;
+  lastEditedAt?: string;
+  lastEditDiscordMessageId?: string;
+  lastEditSummary?: string;
+  lastEditErrorCategory?: string | null;
 }
 
 export interface StoredDocument {
@@ -90,7 +102,12 @@ const storedDocumentMetadataSchema = z.object({
   superdocsChunkCount: z.number().int().nonnegative().optional(),
   discordThreadId: z.string().min(1).optional(),
   discordThreadName: z.string().min(1).max(100).optional(),
-  lastErrorCategory: z.string().min(1).max(100).optional()
+  lastErrorCategory: z.string().min(1).max(100).optional(),
+  editCount: z.number().int().nonnegative().default(0),
+  lastEditedAt: z.string().optional(),
+  lastEditDiscordMessageId: z.string().min(1).max(100).optional(),
+  lastEditSummary: z.string().min(1).max(1_000).optional(),
+  lastEditErrorCategory: z.string().min(1).max(100).optional()
 });
 
 export class DocumentStorageError extends Error {
@@ -211,7 +228,11 @@ export function createDocumentStorage({
 
       try {
         const current = await this.readMetadata(documentId);
-        const { lastErrorCategory, ...fields } = update;
+        const {
+          lastErrorCategory,
+          lastEditErrorCategory,
+          ...fields
+        } = update;
         const next = storedDocumentMetadataSchema.parse({
           ...current,
           ...fields,
@@ -219,6 +240,11 @@ export function createDocumentStorage({
             ? { lastErrorCategory: undefined }
             : lastErrorCategory
               ? { lastErrorCategory }
+              : {}),
+          ...(lastEditErrorCategory === null
+            ? { lastEditErrorCategory: undefined }
+            : lastEditErrorCategory
+              ? { lastEditErrorCategory }
               : {}),
           updatedAt: new Date().toISOString()
         });

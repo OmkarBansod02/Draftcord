@@ -6,7 +6,11 @@ import {
   createDocumentWorkspace,
   DocumentWorkspaceError
 } from "../documents/document-workspace.js";
-import { createDocumentStorage } from "../documents/document-storage.js";
+import {
+  createDocumentStorage,
+  type DocumentStorage
+} from "../documents/document-storage.js";
+import type { DocumentWorkspaceRegistry } from "../documents/workspace-registry.js";
 import {
   sanitizeFilenameForDisplay,
   sanitizeTextForDisplay
@@ -58,6 +62,8 @@ interface InteractionHandlerDependencies {
   logger: Logger;
   superdocsClient?: SuperDocsClient;
   discordClient?: DiscordDocumentThreadClient;
+  storage?: DocumentStorage;
+  registry?: Pick<DocumentWorkspaceRegistry, "register">;
 }
 
 function ephemeralError(content: string): DiscordInteractionResponse {
@@ -191,14 +197,14 @@ export function createInteractionHandler({
     ...createSuperDocsConfig(config.superdocs),
     logger
   }),
-  discordClient = createDiscordRestClient({ botToken: config.botToken })
-}: InteractionHandlerDependencies): RequestHandler {
-  const storage = createDocumentStorage({
+  discordClient = createDiscordRestClient({ botToken: config.botToken }),
+  storage = createDocumentStorage({
     ...(config.storageDirectory
       ? { rootDirectory: config.storageDirectory }
       : {})
-  });
-
+  }),
+  registry
+}: InteractionHandlerDependencies): RequestHandler {
   return (request, response) => {
     try {
       const interaction = request.body as DiscordInteraction;
@@ -330,7 +336,14 @@ export function createInteractionHandler({
               superdocsClient,
               discordClient,
               ownerUserId: config.ownerUserId,
-              documentChannelId: config.documentChannelId
+              documentChannelId: config.documentChannelId,
+              ...(registry
+                ? {
+                    onMetadataChanged: (metadata) => {
+                      registry.register(metadata);
+                    }
+                  }
+                : {})
             }
           );
 

@@ -62,6 +62,7 @@ export interface DocumentWorkspaceDependencies
   discordClient: DiscordDocumentThreadClient;
   ownerUserId: string;
   documentChannelId: string;
+  onMetadataChanged?: (metadata: StoredDocumentMetadata) => void | Promise<void>;
 }
 
 function safeSuperDocsErrorCategory(error: unknown): string {
@@ -111,6 +112,7 @@ export async function createDocumentWorkspace(
     discordClient,
     ownerUserId,
     documentChannelId,
+    onMetadataChanged,
     download,
     verify
   }: DocumentWorkspaceDependencies
@@ -294,10 +296,11 @@ export async function createDocumentWorkspace(
   );
 
   try {
-    await storage.updateMetadata(stored.documentId, {
+    const mappedMetadata = await storage.updateMetadata(stored.documentId, {
       discordThreadId: thread.threadId,
       discordThreadName: thread.name
     });
+    await onMetadataChanged?.(mappedMetadata);
   } catch (error) {
     const errorCategory = "thread_mapping_storage_failed";
     try {
@@ -410,6 +413,7 @@ export async function createDocumentWorkspace(
       status: "ready",
       lastErrorCategory: null
     });
+    await onMetadataChanged?.(metadata);
   } catch (error) {
     const errorCategory = "workspace_ready_status_storage_failed";
     await markFailure(
