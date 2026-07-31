@@ -9,7 +9,8 @@
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "register": "tsx scripts/register-commands.ts",
-    "superdocs:smoke": "tsx scripts/superdocs-smoke-test.ts"
+    "superdocs:smoke": "tsx scripts/superdocs-smoke-test.ts",
+    "superdocs:docx": "tsx scripts/superdocs-docx-roundtrip.ts"
   },
   "keywords": [],
   "author": "",
