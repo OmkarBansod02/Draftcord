@@ -68,9 +68,44 @@ describe("document storage", () => {
         "originalFilename",
         "status",
         "title",
+        "updatedAt",
         "uploadedByUserId"
       ].sort()
     );
+  });
+
+  it("updates metadata atomically with typed workspace fields", async () => {
+    const root = await temporaryDirectory();
+    const storage = createDocumentStorage({
+      rootDirectory: root,
+      generateId: () => "document-123"
+    });
+    const stored = await storage.store(Buffer.from("docx bytes"), {
+      originalFilename: "proposal.docx",
+      uploadedByUserId: "owner-1",
+      guildId: "guild-1",
+      channelId: "channel-1",
+      discordAttachmentId: "attachment-1"
+    });
+
+    const updated = await storage.updateMetadata(stored.documentId, {
+      status: "ready",
+      superdocsSessionId: "draftcord-document-123",
+      superdocsChunkCount: 7,
+      discordThreadId: "thread-1",
+      discordThreadName: "Proposal · document"
+    });
+
+    expect(updated).toMatchObject({
+      status: "ready",
+      superdocsSessionId: "draftcord-document-123",
+      superdocsChunkCount: 7,
+      discordThreadId: "thread-1"
+    });
+    expect(await readdir(stored.directory)).toEqual([
+      "metadata.json",
+      "original.docx"
+    ]);
   });
 
   it("cleans partial files when metadata writing fails", async () => {

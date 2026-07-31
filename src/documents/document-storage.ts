@@ -1,11 +1,26 @@
 import { randomUUID } from "node:crypto";
 import {
   mkdir,
+  readFile,
   rename,
   rm,
   writeFile
 } from "node:fs/promises";
 import path from "node:path";
+import { z } from "zod";
+
+export const DOCUMENT_STATUSES = [
+  "stored",
+  "superdocs_ingesting",
+  "superdocs_ready",
+  "thread_creating",
+  "ready",
+  "superdocs_failed",
+  "thread_failed",
+  "thread_setup_failed"
+] as const;
+
+export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
 
 export interface DocumentMetadataInput {
   originalFilename: string;
@@ -20,7 +35,24 @@ export interface StoredDocumentMetadata extends DocumentMetadataInput {
   documentId: string;
   byteSize: number;
   createdAt: string;
-  status: "stored";
+  updatedAt: string;
+  status: DocumentStatus;
+  superdocsSessionId?: string;
+  superdocsDocumentId?: string;
+  superdocsChunkCount?: number;
+  discordThreadId?: string;
+  discordThreadName?: string;
+  lastErrorCategory?: string;
+}
+
+export interface DocumentMetadataUpdate {
+  status?: DocumentStatus;
+  superdocsSessionId?: string;
+  superdocsDocumentId?: string;
+  superdocsChunkCount?: number;
+  discordThreadId?: string;
+  discordThreadName?: string;
+  lastErrorCategory?: string | null;
 }
 
 export interface StoredDocument {
@@ -40,6 +72,26 @@ export interface DocumentStorageOptions {
     options: { flag: string; mode: number; encoding?: BufferEncoding }
   ) => Promise<void>;
 }
+
+const storedDocumentMetadataSchema = z.object({
+  documentId: z.string().min(1),
+  originalFilename: z.string(),
+  title: z.string().optional(),
+  byteSize: z.number().int().nonnegative(),
+  uploadedByUserId: z.string().min(1),
+  guildId: z.string().min(1),
+  channelId: z.string().min(1),
+  discordAttachmentId: z.string().min(1),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  status: z.enum(DOCUMENT_STATUSES),
+  superdocsSessionId: z.string().min(1).optional(),
+  superdocsDocumentId: z.string().min(1).optional(),
+  superdocsChunkCount: z.number().int().nonnegative().optional(),
+  discordThreadId: z.string().min(1).optional(),
+  discordThreadName: z.string().min(1).max(100).optional(),
+  lastErrorCategory: z.string().min(1).max(100).optional()
+});
 
 export class DocumentStorageError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -82,6 +134,7 @@ export function createDocumentStorage({
 
       const originalPath = path.join(finalDirectory, "original.docx");
       const metadataPath = path.join(finalDirectory, "metadata.json");
+      const now = new Date().toISOString();
       const metadata: StoredDocumentMetadata = {
         documentId,
         originalFilename: input.originalFilename,
@@ -91,7 +144,8 @@ export function createDocumentStorage({
         guildId: input.guildId,
         channelId: input.channelId,
         discordAttachmentId: input.discordAttachmentId,
-        createdAt: new Date().toISOString(),
+        createdAt: now,
+        updatedAt: now,
         status: "stored"
       };
 
@@ -125,6 +179,63 @@ export function createDocumentStorage({
         metadataPath,
         metadata
       };
+    },
+
+    async readMetadata(documentId: string): Promise<StoredDocumentMetadata> {
+      const documentDirectory = path.join(documentsRoot, documentId);
+      ensureContained(documentsRoot, documentDirectory);
+      const metadataPath = path.join(documentDirectory, "metadata.json");
+
+      try {
+        const rawMetadata = await readFile(metadataPath, "utf8");
+        return storedDocumentMetadataSchema.parse(JSON.parse(rawMetadata));
+      } catch (error) {
+        throw new DocumentStorageError("Document metadata could not be read", {
+          cause: error
+        });
+      }
+    },
+
+    async updateMetadata(
+      documentId: string,
+      update: DocumentMetadataUpdate
+    ): Promise<StoredDocumentMetadata> {
+      const documentDirectory = path.join(documentsRoot, documentId);
+      ensureContained(documentsRoot, documentDirectory);
+      const metadataPath = path.join(documentDirectory, "metadata.json");
+      const temporaryMetadataPath = path.join(
+        documentDirectory,
+        `.metadata.${randomUUID()}.tmp`
+      );
+      ensureContained(documentDirectory, temporaryMetadataPath);
+
+      try {
+        const current = await this.readMetadata(documentId);
+        const { lastErrorCategory, ...fields } = update;
+        const next = storedDocumentMetadataSchema.parse({
+          ...current,
+          ...fields,
+          ...(lastErrorCategory === null
+            ? { lastErrorCategory: undefined }
+            : lastErrorCategory
+              ? { lastErrorCategory }
+              : {}),
+          updatedAt: new Date().toISOString()
+        });
+
+        await writeFileImplementation(
+          temporaryMetadataPath,
+          `${JSON.stringify(next, null, 2)}\n`,
+          { flag: "wx", mode: 0o600, encoding: "utf8" }
+        );
+        await rename(temporaryMetadataPath, metadataPath);
+        return next;
+      } catch (error) {
+        await rm(temporaryMetadataPath, { force: true }).catch(() => undefined);
+        throw new DocumentStorageError("Document metadata could not be updated", {
+          cause: error
+        });
+      }
     }
   };
 }

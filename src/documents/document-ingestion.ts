@@ -21,13 +21,16 @@ export type DocumentIngestionErrorCategory =
   | "storage_failed";
 
 export class DocumentIngestionError extends Error {
+  public readonly documentId?: string;
+
   constructor(
     public readonly category: DocumentIngestionErrorCategory,
     public readonly userMessage: string,
-    options?: ErrorOptions
+    options?: ErrorOptions & { documentId?: string }
   ) {
     super(userMessage, options);
     this.name = "DocumentIngestionError";
+    this.documentId = options?.documentId;
   }
 }
 
@@ -89,7 +92,10 @@ export async function ingestDocument(
       { ...logContext, processingStage: "download", errorCategory: category },
       "Document download failed"
     );
-    throw new DocumentIngestionError(category, userMessage, { cause: error });
+    throw new DocumentIngestionError(category, userMessage, {
+      cause: error,
+      documentId
+    });
   }
 
   logger.info(
@@ -116,7 +122,7 @@ export async function ingestDocument(
     throw new DocumentIngestionError(
       "invalid_docx",
       "File is not a valid DOCX document.",
-      { cause: cause ?? error }
+      { cause: cause ?? error, documentId }
     );
   }
 
@@ -166,7 +172,7 @@ export async function ingestDocument(
     throw new DocumentIngestionError(
       "storage_failed",
       "Document could not be stored.",
-      { cause: cause ?? error }
+      { cause: cause ?? error, documentId }
     );
   }
 }

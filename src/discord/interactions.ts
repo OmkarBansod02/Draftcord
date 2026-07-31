@@ -1,16 +1,22 @@
 import type { RequestHandler } from "express";
 import type { Logger } from "pino";
 
+import { DocumentIngestionError } from "../documents/document-ingestion.js";
 import {
-  DocumentIngestionError,
-  ingestDocument
-} from "../documents/document-ingestion.js";
+  createDocumentWorkspace,
+  DocumentWorkspaceError
+} from "../documents/document-workspace.js";
 import { createDocumentStorage } from "../documents/document-storage.js";
 import {
   sanitizeFilenameForDisplay,
   sanitizeTextForDisplay
 } from "../documents/filename-safety.js";
-import { editOriginalInteractionResponse } from "./api.js";
+import {
+  createDiscordRestClient,
+  DiscordApiError,
+  editOriginalInteractionResponse,
+  type DiscordDocumentThreadClient
+} from "./api.js";
 import type {
   DiscordAttachment,
   DiscordInteraction,
@@ -23,6 +29,14 @@ import {
   validateUploadAccess,
   type UploadAccessPolicy
 } from "./upload-validation.js";
+import {
+  createSuperDocsClient,
+  type SuperDocsClient
+} from "../superdocs/client.js";
+import {
+  createSuperDocsConfig,
+  type SuperDocsConfig
+} from "../superdocs/config.js";
 
 const APPLICATION_COMMAND = 2;
 const CHANNEL_MESSAGE_WITH_SOURCE = 4;
@@ -34,12 +48,16 @@ const EPHEMERAL_FLAG = 1 << 6;
 
 export interface InteractionHandlerConfig extends UploadAccessPolicy {
   applicationId: string;
+  botToken: string;
+  superdocs: SuperDocsConfig;
   storageDirectory?: string;
 }
 
 interface InteractionHandlerDependencies {
   config: InteractionHandlerConfig;
   logger: Logger;
+  superdocsClient?: SuperDocsClient;
+  discordClient?: DiscordDocumentThreadClient;
 }
 
 function ephemeralError(content: string): DiscordInteractionResponse {
@@ -100,32 +118,80 @@ function getUploadData(interaction: DiscordInteraction):
   return title ? { attachment, title } : { attachment };
 }
 
-function buildUploadSuccessMessage(
-  documentId: string,
-  originalFilename: string,
-  byteSize: number,
-  title?: string
+function buildWorkspaceSuccessMessage(
+  result: Awaited<ReturnType<typeof createDocumentWorkspace>>
 ): string {
+  const { metadata } = result;
   const lines = [
-    "✅ Document uploaded successfully.",
-    `Document ID: ${documentId}`,
-    `Original filename: ${sanitizeFilenameForDisplay(originalFilename)}`,
-    `File size: ${formatFileSize(byteSize)}`
+    "✅ Draftcord workspace ready",
+    "",
+    `Title: ${sanitizeTextForDisplay(metadata.title ?? sanitizeFilenameForDisplay(metadata.originalFilename).replace(/\.docx$/i, ""))}`,
+    `Filename: ${sanitizeFilenameForDisplay(metadata.originalFilename)}`,
+    `File size: ${formatFileSize(metadata.byteSize)}`,
+    `Draftcord document ID: ${metadata.documentId}`,
+    "DOCX structure verified.",
+    "SuperDocs session ready."
   ];
 
-  if (title) {
-    lines.push(`Title: ${sanitizeTextForDisplay(title)}`);
+  if (result.superdocs.chunkCount !== undefined) {
+    lines.push(
+      `Structure: ${result.superdocs.chunkCount} document chunks detected.`
+    );
   }
 
-  lines.push("DOCX structure verified.");
-  lines.push("Original file stored safely.");
-  lines.push("SuperDocs ingestion will happen in Phase 3.");
+  lines.push(`Thread: ${result.discordThreadUrl}`);
+  lines.push("");
+  lines.push("Open the thread to use the document workspace.");
   return lines.join("\n");
+}
+
+function buildWorkspaceFailureMessage(error: unknown): string {
+  if (error instanceof DocumentWorkspaceError) {
+    const stage =
+      error.stage === "superdocs_ingestion"
+        ? "SuperDocs ingestion"
+        : error.stage === "discord_thread_creation"
+          ? "Discord thread creation"
+          : "Discord thread setup";
+    const lines = [
+      "❌ Draftcord workspace setup failed.",
+      `Failed stage: ${stage}`,
+      `Draftcord document ID: ${error.documentId}`,
+      "Original DOCX safely retained: yes"
+    ];
+    if (error.threadUrl) {
+      lines.push(`Created thread: ${error.threadUrl}`);
+    }
+    lines.push("Inspect the server logs for the safe failure category.");
+    return lines.join("\n");
+  }
+
+  if (error instanceof DocumentIngestionError) {
+    return [
+      `❌ ${error.userMessage}`,
+      "Failed stage: local document ingestion",
+      `Draftcord document ID: ${error.documentId ?? "not stored"}`,
+      "Original DOCX safely retained: no",
+      "Inspect the server logs for the safe failure category."
+    ].join("\n");
+  }
+
+  return [
+    "❌ Draftcord could not process this document.",
+    "Failed stage: workspace provisioning",
+    "Draftcord document ID: unavailable",
+    "Inspect the server logs for details."
+  ].join("\n");
 }
 
 export function createInteractionHandler({
   config,
-  logger
+  logger,
+  superdocsClient = createSuperDocsClient({
+    ...createSuperDocsConfig(config.superdocs),
+    logger
+  }),
+  discordClient = createDiscordRestClient({ botToken: config.botToken })
 }: InteractionHandlerDependencies): RequestHandler {
   const storage = createDocumentStorage({
     ...(config.storageDirectory
@@ -249,7 +315,7 @@ export function createInteractionHandler({
         let content: string;
 
         try {
-          const stored = await ingestDocument(
+          const workspace = await createDocumentWorkspace(
             {
               interactionId: interaction.id,
               attachment: uploadData.attachment,
@@ -258,23 +324,24 @@ export function createInteractionHandler({
               guildId: uploadGuildId,
               channelId: uploadChannelId
             },
-            { logger, storage }
+            {
+              logger,
+              storage,
+              superdocsClient,
+              discordClient,
+              ownerUserId: config.ownerUserId,
+              documentChannelId: config.documentChannelId
+            }
           );
 
-          content = buildUploadSuccessMessage(
-            stored.documentId,
-            stored.metadata.originalFilename,
-            stored.metadata.byteSize,
-            stored.metadata.title
-          );
+          content = buildWorkspaceSuccessMessage(workspace);
         } catch (error) {
-          content = `❌ ${
-            error instanceof DocumentIngestionError
-              ? error.userMessage
-              : "Draftcord could not process this document."
-          }`;
+          content = buildWorkspaceFailureMessage(error);
 
-          if (!(error instanceof DocumentIngestionError)) {
+          if (
+            !(error instanceof DocumentIngestionError) &&
+            !(error instanceof DocumentWorkspaceError)
+          ) {
             logger.error(
               {
                 interactionId: interaction.id,
@@ -297,23 +364,17 @@ export function createInteractionHandler({
             {
               interactionId: interaction.id,
               processingStage: "response_edit",
-              errorCategory: "discord_api_error",
-              error:
-                error instanceof Error
-                  ? error.message
-                  : "Unknown interaction response edit error"
+              errorCategory:
+                error instanceof DiscordApiError ? error.category : "unexpected"
             },
             "Failed to edit deferred Discord interaction response"
           );
         }
       })();
-    } catch (error) {
+    } catch {
       logger.error(
         {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Unknown interaction handling error"
+          errorCategory: "interaction_handler_unexpected"
         },
         "Discord interaction handler failed"
       );
