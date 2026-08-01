@@ -46,21 +46,31 @@ async function harness() {
   const reviewClient: SuperDocsReviewClient = {
     startReview: vi.fn(),
     getJob: vi.fn(),
-    pollJob: vi.fn(),
+    pollJob: vi.fn(async () => ({ status: "completed" as const })),
     decideReview: vi.fn()
   };
+  const reviewStore = createReviewStore({ storage, logger });
   const component = createComponentInteractionHandler({
     config: { applicationId: "app-1", ownerUserId: "owner-1", guildId: "guild-1" },
     logger,
     storage,
     registry,
-    reviewStore: createReviewStore({ storage, logger }),
+    reviewStore,
     activity: createEditActivityRepository({ storage, logger }),
     reviewClient,
     discordClient: { editThreadMessage, createThreadMessage },
     followup
   });
-  return { storage, component, editThreadMessage, followup, logger, registry };
+  return {
+    storage,
+    reviewStore,
+    reviewClient,
+    component,
+    editThreadMessage,
+    followup,
+    logger,
+    registry
+  };
 }
 
 function modeInteraction(overrides: Partial<DiscordInteraction> = {}): DiscordInteraction {
@@ -76,6 +86,17 @@ function modeInteraction(overrides: Partial<DiscordInteraction> = {}): DiscordIn
     data: { custom_id: "draftcord:mode:auto_apply:document-1", component_type: 2 },
     ...overrides
   };
+}
+
+function reviewInteraction(overrides: Partial<DiscordInteraction> = {}): DiscordInteraction {
+  return modeInteraction({
+    message: { id: "review-message-1" },
+    data: {
+      custom_id: "draftcord:review:approve:review-1",
+      component_type: 2
+    },
+    ...overrides
+  });
 }
 
 describe("Discord component interactions", () => {
@@ -127,6 +148,56 @@ describe("Discord component interactions", () => {
     expect(context.component.handle(modeInteraction({
       data: { custom_id: "draftcord:unknown:value", component_type: 2 }
     }))?.response).toMatchObject({ type: 4, data: { flags: 64 } });
+  });
+
+  it("transitions pending to decision processing only from an identified review component", async () => {
+    const context = await harness();
+    const now = new Date().toISOString();
+    await context.reviewStore.create({
+      reviewId: "review-1",
+      documentId: "document-1",
+      discordThreadId: "thread-1",
+      discordInstructionMessageId: "instruction-1",
+      discordReviewMessageId: "review-message-1",
+      requestedByUserId: "owner-1",
+      instructionPreview: "Change the deadline",
+      superdocsJobId: "job-1",
+      changeIds: ["change-1"],
+      proposedChanges: [{ changeId: "change-1", operation: "edit" }],
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    await context.storage.updateMetadata("document-1", {
+      status: "awaiting_approval",
+      pendingReviewId: "review-1",
+      pendingReviewMessageId: "review-message-1"
+    });
+
+    const missingIdentity = context.component.handle(reviewInteraction({
+      id: undefined,
+      token: undefined
+    }));
+    expect(missingIdentity?.response).toMatchObject({ type: 4, data: { flags: 64 } });
+    expect((await context.reviewStore.read("document-1"))?.status).toBe("pending");
+    expect(context.reviewClient.decideReview).not.toHaveBeenCalled();
+
+    vi.mocked(context.reviewClient.decideReview).mockImplementationOnce(async () => {
+      expect(await context.reviewStore.read("document-1")).toMatchObject({
+        status: "decision_processing",
+        decisionInteractionId: "interaction-1"
+      });
+    });
+    const actualClick = context.component.handle(reviewInteraction());
+    expect(actualClick?.response).toEqual({ type: 6 });
+    expect((await context.reviewStore.read("document-1"))?.status).toBe("pending");
+    await actualClick?.afterResponse?.();
+    expect(context.reviewClient.decideReview).toHaveBeenCalledOnce();
+    expect(await context.reviewStore.read("document-1")).toMatchObject({
+      status: "completed",
+      decisionInteractionId: "interaction-1"
+    });
   });
 
   it("routes type 3 through the HTTP handler while command interactions still work", () => {

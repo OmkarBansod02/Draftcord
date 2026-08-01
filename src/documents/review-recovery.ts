@@ -26,16 +26,23 @@ export async function reconcilePendingReviews({
 
   for (const review of reviews) {
     if (review.status === "generating" || review.status === "decision_processing") {
+      const interruptedDecision = review.status === "decision_processing";
+      const recoveryStatus = interruptedDecision
+        ? "reconciliation_required"
+        : "failed";
+      const recoveryCategory = interruptedDecision
+        ? "interrupted_decision_reconciliation"
+        : "interrupted_review_generation";
       await reviewStore.replace({
         ...review,
-        status: "ambiguous",
-        safeErrorCategory: "interrupted_operation"
+        status: recoveryStatus,
+        safeErrorCategory: recoveryCategory
       }, [review.status]).catch(() => undefined);
       const metadata = await storage.updateMetadata(review.documentId, {
         status: "review_failed",
         pendingReviewId: null,
         pendingReviewMessageId: null,
-        lastReviewErrorCategory: "interrupted_operation"
+        lastReviewErrorCategory: recoveryCategory
       }).catch(() => undefined);
       if (metadata) registry.register(metadata);
       logger.warn(
@@ -43,9 +50,11 @@ export async function reconcilePendingReviews({
           event: "ambiguous_review_not_replayed",
           documentId: review.documentId,
           reviewId: review.reviewId,
-          errorCategory: "interrupted_operation"
+          errorCategory: recoveryCategory
         },
-        "Interrupted review was not replayed"
+        interruptedDecision
+          ? "Interrupted review decision requires reconciliation and was not replayed"
+          : "Interrupted review generation failed safely and was not replayed"
       );
       continue;
     }

@@ -26,7 +26,7 @@ import type {
 } from "./document-storage.js";
 import { sanitizeFilenameForDisplay } from "./filename-safety.js";
 import { DEFAULT_EDIT_MODE, type EditMode } from "./edit-mode.js";
-import { createModeComponents } from "../discord/review-components.js";
+import { createWorkspaceControlComponents } from "../discord/review-components.js";
 
 export type WorkspaceFailureStage =
   | "superdocs_ingestion"
@@ -372,7 +372,7 @@ export async function createDocumentWorkspace(
         chunkCount: superdocs.chunkCount,
         editMode: defaultEditMode
       }),
-      createModeComponents(stored.documentId, defaultEditMode)
+      createWorkspaceControlComponents(stored.documentId, defaultEditMode)
     );
     const controlMetadata = await storage.updateMetadata(stored.documentId, {
       modeControlMessageId: welcomeMessage.id

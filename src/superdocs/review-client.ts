@@ -130,6 +130,15 @@ function statusCategory(operation: Operation, status: number): SuperDocsReviewEr
   return `${operation}_${suffix}` as SuperDocsReviewErrorCategory;
 }
 
+function isRetryablePollFailure(error: unknown): error is SuperDocsReviewError {
+  return error instanceof SuperDocsReviewError && [
+    "review_poll_timeout",
+    "review_poll_network",
+    "review_poll_rate_limited",
+    "review_poll_server_error"
+  ].includes(error.category);
+}
+
 async function timedFetch(
   fetchImplementation: typeof fetch,
   url: string,
@@ -285,7 +294,24 @@ export function createSuperDocsReviewClient({
           );
         }
         attempt += 1;
-        const job = await client.getJob(jobId);
+        let job: SuperDocsReviewJob;
+        try {
+          job = await client.getJob(jobId);
+        } catch (error) {
+          if (!isRetryablePollFailure(error)) throw error;
+          logger?.warn(
+            {
+              event: "superdocs_review_poll_retry",
+              pollingAttempt: attempt,
+              durationMs: Date.now() - startedAt,
+              errorCategory: error.category
+            },
+            "Transient SuperDocs review poll failed; retrying the read-only GET"
+          );
+          await sleep(interval);
+          waitedMs += interval;
+          continue;
+        }
         logger?.info(
           {
             event: "superdocs_review_poll",

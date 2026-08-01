@@ -14,7 +14,8 @@ export const TERMINAL_EDIT_ACTIVITY_STATUSES = [
   "approved",
   "rejected",
   "review_failed",
-  "ambiguous"
+  "ambiguous",
+  "reconciliation_required"
 ] as const;
 
 export type TerminalEditActivityStatus =
@@ -40,6 +41,7 @@ export interface EditActivityRecord {
   errorCategory?: string;
   reviewId?: string;
   decision?: "approved" | "rejected";
+  discordInteractionId?: string;
 }
 
 export type EditActivityState =
@@ -66,7 +68,8 @@ const activitySchema = z.object({
   changedSectionCount: z.number().int().nonnegative().optional(),
   errorCategory: z.string().min(1).max(100).optional(),
   reviewId: z.string().min(1).max(100).optional(),
-  decision: z.enum(["approved", "rejected"]).optional()
+  decision: z.enum(["approved", "rejected"]).optional(),
+  discordInteractionId: z.string().min(1).max(100).optional()
 });
 
 function activityPath(storage: DocumentStorage, documentId: string): string {

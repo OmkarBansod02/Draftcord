@@ -1,6 +1,7 @@
+import { readFile } from "node:fs/promises";
 import { z } from "zod";
 
-import type { DiscordActionRow } from "./review-components.js";
+import type { DiscordActionRow, ExportFormat } from "./review-components.js";
 
 const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -87,11 +88,22 @@ export interface DiscordComponentMessageClient {
   ): Promise<{ id: string }>;
 }
 
+export interface DiscordExportFileClient {
+  uploadThreadFile(input: {
+    threadId: string;
+    content: string;
+    filePath: string;
+    filename: string;
+    format: ExportFormat;
+  }): Promise<{ id: string }>;
+}
+
 interface DiscordRestClientOptions {
   botToken: string;
   fetchImplementation?: typeof fetch;
   apiBaseUrl?: string;
   requestTimeoutMs?: number;
+  readFileImplementation?: (file: string) => Promise<Buffer>;
 }
 
 function errorCategoryForStatus(status: number): DiscordApiErrorCategory {
@@ -175,8 +187,9 @@ export function createDiscordRestClient({
   botToken,
   fetchImplementation = fetch,
   apiBaseUrl = DISCORD_API_BASE_URL,
-  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
-}: DiscordRestClientOptions): DiscordDocumentThreadClient & DiscordComponentMessageClient {
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  readFileImplementation = (file) => readFile(file)
+}: DiscordRestClientOptions): DiscordDocumentThreadClient & DiscordComponentMessageClient & DiscordExportFileClient {
   return {
     async createPublicThread({
       channelId,
@@ -267,6 +280,55 @@ export function createDiscordRestClient({
       );
       await requireSuccess(response);
       await response.body?.cancel().catch(() => undefined);
+    },
+
+    async uploadThreadFile({
+      threadId,
+      content,
+      filePath,
+      filename,
+      format
+    }): Promise<{ id: string }> {
+      let bytes: Buffer;
+      try {
+        bytes = await readFileImplementation(filePath);
+      } catch (error) {
+        throw new DiscordApiError(
+          "network",
+          "Verified export file could not be read for Discord delivery",
+          undefined,
+          { cause: error }
+        );
+      }
+
+      const payload = {
+        content,
+        allowed_mentions: { parse: [] },
+        attachments: [{ id: "0", filename }]
+      };
+      const form = new FormData();
+      form.append("payload_json", JSON.stringify(payload));
+      form.append(
+        "files[0]",
+        new Blob([new Uint8Array(bytes)], {
+          type: format === "pdf"
+            ? "application/pdf"
+            : "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }),
+        filename
+      );
+
+      const response = await discordFetch(
+        fetchImplementation,
+        `${apiBaseUrl}/channels/${encodeURIComponent(threadId)}/messages`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bot ${botToken}` },
+          body: form
+        },
+        requestTimeoutMs
+      );
+      return parseDiscordJson(response, messageResponseSchema);
     }
   };
 }

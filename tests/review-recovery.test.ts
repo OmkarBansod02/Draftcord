@@ -71,7 +71,7 @@ function client(getJob: SuperDocsReviewClient["getJob"]): SuperDocsReviewClient 
 
 describe("startup review reconciliation", () => {
   it.each(["generating", "decision_processing"] as const)(
-    "marks interrupted %s work ambiguous without replaying it",
+    "classifies interrupted %s work without replaying it",
     async (status) => {
       const test = await setup(status, new Date(Date.now() + 60_000).toISOString());
       const getJob = vi.fn();
@@ -79,8 +79,18 @@ describe("startup review reconciliation", () => {
         ...test,
         reviewClient: client(getJob)
       });
-      expect((await test.reviewStore.read("document-1"))?.status).toBe("ambiguous");
-      expect((await test.storage.readMetadata("document-1")).status).toBe("review_failed");
+      expect(await test.reviewStore.read("document-1")).toMatchObject({
+        status: status === "generating" ? "failed" : "reconciliation_required",
+        safeErrorCategory: status === "generating"
+          ? "interrupted_review_generation"
+          : "interrupted_decision_reconciliation"
+      });
+      expect(await test.storage.readMetadata("document-1")).toMatchObject({
+        status: "review_failed",
+        lastReviewErrorCategory: status === "generating"
+          ? "interrupted_review_generation"
+          : "interrupted_decision_reconciliation"
+      });
       expect(getJob).not.toHaveBeenCalled();
     }
   );

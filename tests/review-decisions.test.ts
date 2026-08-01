@@ -150,13 +150,54 @@ describe("review decision idempotency", () => {
     });
     const test = await harness(decide);
     await expect(test.processor.process(context)).resolves.toContain("uncertain");
-    expect((await test.reviewStore.read("document-1"))?.status).toBe("ambiguous");
+    expect(await test.reviewStore.read("document-1")).toMatchObject({
+      status: "ambiguous",
+      decisionInteractionId: "interaction-1",
+      safeErrorCategory: "review_decision_timeout"
+    });
     expect(await test.storage.readMetadata("document-1")).toMatchObject({
       status: "review_failed",
       editCount: 0
     });
     await test.processor.process(context);
     expect(decide).toHaveBeenCalledOnce();
+  });
+
+  it("separates post-decision polling failure from an ambiguous approval POST", async () => {
+    const decide = vi.fn(async () => undefined);
+    const test = await harness(decide);
+    vi.mocked(test.reviewClient.pollJob).mockRejectedValueOnce(
+      new SuperDocsReviewError("review_poll_network", "temporary GET failure")
+    );
+
+    await expect(test.processor.process(context)).resolves.toContain(
+      "resulting job state could not be confirmed"
+    );
+    expect(await test.reviewStore.read("document-1")).toMatchObject({
+      status: "reconciliation_required",
+      decision: "approved",
+      decisionInteractionId: "interaction-1",
+      safeErrorCategory: "review_reconciliation_poll_network"
+    });
+    expect(await test.storage.readMetadata("document-1")).toMatchObject({
+      status: "review_failed",
+      lastReviewErrorCategory: "review_reconciliation_poll_network",
+      editCount: 0
+    });
+    await test.processor.process(context);
+    expect(decide).toHaveBeenCalledOnce();
+  });
+
+  it("cannot claim pending review state without a Discord component interaction ID", async () => {
+    const decide = vi.fn(async () => undefined);
+    const test = await harness(decide);
+    await expect(test.processor.process({ ...context, interactionId: "" }))
+      .resolves.toContain("missing its Discord interaction identity");
+    expect((await test.reviewStore.read("document-1"))?.status).toBe("pending");
+    expect((await test.storage.readMetadata("document-1")).status).toBe(
+      "awaiting_approval"
+    );
+    expect(decide).not.toHaveBeenCalled();
   });
 
   it.each(["approve", "reject"] as const)(

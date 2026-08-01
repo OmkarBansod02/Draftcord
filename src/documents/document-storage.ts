@@ -25,7 +25,8 @@ export const DOCUMENT_STATUSES = [
   "review_generating",
   "awaiting_approval",
   "approval_processing",
-  "review_failed"
+  "review_failed",
+  "exporting"
 ] as const;
 
 export type DocumentStatus = (typeof DOCUMENT_STATUSES)[number];
@@ -64,6 +65,11 @@ export interface StoredDocumentMetadata extends DocumentMetadataInput {
   lastReviewDecision?: "approved" | "rejected";
   lastReviewDecisionAt?: string;
   lastReviewErrorCategory?: string;
+  lastExportAt?: string;
+  lastExportFormat?: "docx" | "pdf";
+  lastExportVersion?: number;
+  lastExportDiscordMessageId?: string;
+  lastExportErrorCategory?: string;
 }
 
 export interface DocumentMetadataUpdate {
@@ -86,6 +92,11 @@ export interface DocumentMetadataUpdate {
   lastReviewDecision?: "approved" | "rejected" | null;
   lastReviewDecisionAt?: string | null;
   lastReviewErrorCategory?: string | null;
+  lastExportAt?: string;
+  lastExportFormat?: "docx" | "pdf";
+  lastExportVersion?: number;
+  lastExportDiscordMessageId?: string;
+  lastExportErrorCategory?: string | null;
 }
 
 export interface StoredDocument {
@@ -135,7 +146,12 @@ const storedDocumentMetadataSchema = z.object({
   pendingReviewMessageId: z.string().min(1).max(100).optional(),
   lastReviewDecision: z.enum(["approved", "rejected"]).optional(),
   lastReviewDecisionAt: z.string().optional(),
-  lastReviewErrorCategory: z.string().min(1).max(100).optional()
+  lastReviewErrorCategory: z.string().min(1).max(100).optional(),
+  lastExportAt: z.string().optional(),
+  lastExportFormat: z.enum(["docx", "pdf"]).optional(),
+  lastExportVersion: z.number().int().nonnegative().optional(),
+  lastExportDiscordMessageId: z.string().min(1).max(100).optional(),
+  lastExportErrorCategory: z.string().min(1).max(100).optional()
 }).transform((metadata) => ({
   ...metadata,
   updatedAt: metadata.updatedAt ?? metadata.createdAt,

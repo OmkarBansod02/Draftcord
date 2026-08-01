@@ -16,7 +16,8 @@ export const REVIEW_STATUSES = [
   "completed",
   "failed",
   "expired",
-  "ambiguous"
+  "ambiguous",
+  "reconciliation_required"
 ] as const;
 
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
@@ -48,6 +49,7 @@ export interface PendingReview {
   expiresAt: string;
   decision?: ReviewDecision;
   decidedAt?: string;
+  decisionInteractionId?: string;
   safeErrorCategory?: string;
 }
 
@@ -82,6 +84,7 @@ export const pendingReviewSchema = z.object({
   expiresAt: z.string(),
   decision: z.enum(["approved", "rejected"]).optional(),
   decidedAt: z.string().optional(),
+  decisionInteractionId: z.string().min(1).max(100).optional(),
   safeErrorCategory: z.string().min(1).max(100).optional()
 });
 
@@ -89,7 +92,8 @@ const UNRESOLVED_STATUSES = new Set<ReviewStatus>([
   "generating",
   "pending",
   "decision_processing",
-  "ambiguous"
+  "ambiguous",
+  "reconciliation_required"
 ]);
 
 const BASIC_ENTITIES: Record<string, string> = {

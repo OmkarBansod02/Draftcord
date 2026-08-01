@@ -5,7 +5,8 @@ import {
   type DiscordComponentMessageClient
 } from "./api.js";
 import {
-  createModeComponents
+  createWorkspaceControlComponents,
+  type ExportFormat
 } from "./review-components.js";
 import { createWorkspaceWelcomeMessage } from "./document-threads.js";
 import type {
@@ -19,16 +20,19 @@ import type { ReviewStore } from "../documents/review-store.js";
 import type { EditActivityRepository } from "../documents/edit-activity.js";
 import { createReviewDecisionProcessor } from "../documents/review-decisions.js";
 import type { SuperDocsReviewClient } from "../superdocs/review-client.js";
+import type { DocumentExportWorkflow } from "../documents/export-workflow.js";
 
 const MESSAGE_COMPONENT = 3;
 const CHANNEL_MESSAGE_WITH_SOURCE = 4;
+const DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5;
 const DEFERRED_MESSAGE_UPDATE = 6;
 const EPHEMERAL_FLAG = 1 << 6;
 const BLOCKED_MODE_STATUSES = new Set([
   "editing",
   "review_generating",
   "awaiting_approval",
-  "approval_processing"
+  "approval_processing",
+  "exporting"
 ]);
 
 export interface ComponentInteractionResult {
@@ -57,7 +61,8 @@ function userId(interaction: DiscordInteraction): string | undefined {
 
 type ParsedControl =
   | { kind: "mode"; mode: EditMode; documentId: string }
-  | { kind: "review"; decision: "approve" | "reject"; reviewId: string };
+  | { kind: "review"; decision: "approve" | "reject"; reviewId: string }
+  | { kind: "export"; format: ExportFormat; documentId: string };
 
 export function parseDraftcordCustomId(customId: string): ParsedControl | undefined {
   const mode = /^draftcord:mode:(auto_apply|review):([A-Za-z0-9_-]{1,64})$/.exec(customId);
@@ -76,6 +81,14 @@ export function parseDraftcordCustomId(customId: string): ParsedControl | undefi
       reviewId: review[2] as string
     };
   }
+  const exportControl = /^draftcord:export:(docx|pdf):([A-Za-z0-9_-]{1,64})$/.exec(customId);
+  if (exportControl) {
+    return {
+      kind: "export",
+      format: exportControl[1] as ExportFormat,
+      documentId: exportControl[2] as string
+    };
+  }
   return undefined;
 }
 
@@ -88,7 +101,8 @@ export function createComponentInteractionHandler({
   activity,
   reviewClient,
   discordClient,
-  followup = sendInteractionFollowup
+  followup = sendInteractionFollowup,
+  exportWorkflow
 }: {
   config: {
     applicationId: string;
@@ -103,6 +117,7 @@ export function createComponentInteractionHandler({
   reviewClient: SuperDocsReviewClient;
   discordClient: DiscordComponentMessageClient;
   followup?: typeof sendInteractionFollowup;
+  exportWorkflow?: DocumentExportWorkflow;
 }): ComponentInteractionHandler {
   const modeLocks = new Set<string>();
   const decisions = createReviewDecisionProcessor({
@@ -137,7 +152,9 @@ export function createComponentInteractionHandler({
         {
           event: parsed?.kind === "review"
             ? "review_component_received"
-            : "mode_component_received",
+            : parsed?.kind === "export"
+              ? "export_component_received"
+              : "mode_component_received",
           interactionId: interaction.id,
           interactionType: interaction.type,
           guildId: interaction.guild_id,
@@ -164,7 +181,31 @@ export function createComponentInteractionHandler({
         return { response: ephemeral("That control is missing its document context.") };
       }
 
+      if (parsed.kind === "export") {
+        if (!exportWorkflow || !interaction.id || !interaction.token) {
+          return { response: ephemeral("That export control is temporarily unavailable.") };
+        }
+        return {
+          response: {
+            type: DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              flags: EPHEMERAL_FLAG
+            }
+          },
+          afterResponse: async () => {
+            await exportWorkflow.run({
+              interaction,
+              documentId: parsed.documentId,
+              format: parsed.format
+            });
+          }
+        };
+      }
+
       if (parsed.kind === "review") {
+        if (!interaction.id || !interaction.token) {
+          return { response: ephemeral("That review control is temporarily unavailable.") };
+        }
         const context = {
           reviewId: parsed.reviewId,
           decision: parsed.decision,
@@ -172,7 +213,7 @@ export function createComponentInteractionHandler({
           channelId: interaction.channel_id,
           messageId: interaction.message.id,
           userId: invokingUserId,
-          ...(interaction.id ? { interactionId: interaction.id } : {})
+          interactionId: interaction.id
         };
         return {
           response: { type: DEFERRED_MESSAGE_UPDATE },
@@ -198,7 +239,10 @@ export function createComponentInteractionHandler({
             await notify(interaction, "That mode control does not match this document workspace.");
             return;
           }
-          if (BLOCKED_MODE_STATUSES.has(metadata.status)) {
+          if (
+            BLOCKED_MODE_STATUSES.has(metadata.status) ||
+            exportWorkflow?.isActive(metadata.documentId)
+          ) {
             await notify(
               interaction,
               "Resolve the document's current edit or review operation before changing modes."
@@ -233,7 +277,7 @@ export function createComponentInteractionHandler({
                   chunkCount: metadata.superdocsChunkCount,
                   editMode: parsed.mode
                 }),
-                createModeComponents(metadata.documentId, parsed.mode)
+                createWorkspaceControlComponents(metadata.documentId, parsed.mode)
               );
             } catch {
               const rolledBack = await storage.updateMetadata(metadata.documentId, {

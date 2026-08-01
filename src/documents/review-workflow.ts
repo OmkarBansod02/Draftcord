@@ -3,7 +3,7 @@ import type { Logger } from "pino";
 
 import {
   formatReviewProposal,
-  createModeComponents,
+  createWorkspaceControlComponents,
   type DiscordActionRow
 } from "../discord/review-components.js";
 import type { DiscordComponentMessageClient } from "../discord/api.js";
@@ -125,16 +125,15 @@ export function createReviewMessageWorkflow({
     activityId: string,
     review: PendingReview | undefined,
     statusMessage: Awaited<ReturnType<Message["reply"]>>,
-    error: unknown,
-    modifyingRequestCreated: boolean
+    error: unknown
   ): Promise<void> {
     const category = errorCategory(error);
-    const knownTerminalJobFailure = [
-      "review_job_failed",
-      "review_job_cancelled"
-    ].includes(category);
-    const ambiguous = isAmbiguousCreation(error) ||
-      (modifyingRequestCreated && !knownTerminalJobFailure);
+    // Once startReview returns a job ID, generation has not modified the
+    // document: ask_every_time still requires a component decision. A GET
+    // polling failure is therefore a generation failure, not an ambiguous
+    // approval decision. Only an uncertain POST /chat/async creation remains
+    // ambiguous here and it is never retried automatically.
+    const ambiguous = isAmbiguousCreation(error);
     const now = new Date().toISOString();
     if (review) {
       await reviewStore.replace(
@@ -166,7 +165,7 @@ export function createReviewMessageWorkflow({
           chunkCount: failed.superdocsChunkCount,
           editMode: failed.editMode
         }),
-        createModeComponents(failed.documentId, failed.editMode)
+        createWorkspaceControlComponents(failed.documentId, failed.editMode)
       ).catch(() => undefined);
     }
     await activity.append(metadata.documentId, {
@@ -176,7 +175,7 @@ export function createReviewMessageWorkflow({
       discordThreadId: message.channelId,
       requestedByUserId: config.ownerUserId,
       status: ambiguous ? "ambiguous" : "review_failed",
-      createdAt: now,
+      createdAt: review?.createdAt ?? now,
       completedAt: now,
       ...(review ? { reviewId: review.reviewId } : {}),
       errorCategory: category
@@ -225,7 +224,6 @@ export function createReviewMessageWorkflow({
     }
 
     let review: PendingReview | undefined;
-    let modifyingRequestCreated = false;
     try {
       const previousActivity = await activity.getState(
         metadataSnapshot.documentId,
@@ -246,7 +244,7 @@ export function createReviewMessageWorkflow({
       if (isUnresolvedReview(existingReview)) {
         await editReviewMessage(
           statusMessage,
-          existingReview?.status === "ambiguous"
+          existingReview && ["ambiguous", "reconciliation_required"].includes(existingReview.status)
             ? "⚠️ An earlier review has an uncertain or paused outcome. It must be investigated manually before another document edit can start."
             : "⏳ Approve or reject the current proposal before sending another document edit."
         );
@@ -295,7 +293,6 @@ export function createReviewMessageWorkflow({
         sessionId: metadata.superdocsSessionId,
         instruction
       });
-      modifyingRequestCreated = true;
       const reviewId = reviewStore.createReviewId();
       const reviewMessageId = statusMessage.id;
       if (!reviewMessageId) throw new Error("Discord review message has no ID");
@@ -358,7 +355,7 @@ export function createReviewMessageWorkflow({
         const now = new Date().toISOString();
         await reviewStore.replace({
           ...review,
-          status: "ambiguous",
+          status: "reconciliation_required",
           safeErrorCategory: "continue_prompt_unsupported",
           updatedAt: now
         }, ["generating"]);
@@ -376,7 +373,7 @@ export function createReviewMessageWorkflow({
           discordMessageId: message.id,
           discordThreadId: message.channelId,
           requestedByUserId: config.ownerUserId,
-          status: "ambiguous",
+          status: "reconciliation_required",
           createdAt,
           completedAt: now,
           errorCategory: "continue_prompt_unsupported"
@@ -444,7 +441,7 @@ export function createReviewMessageWorkflow({
             chunkCount: metadata.superdocsChunkCount,
             editMode: metadata.editMode
           }),
-          createModeComponents(metadata.documentId, metadata.editMode, true)
+          createWorkspaceControlComponents(metadata.documentId, metadata.editMode, true)
         ).catch(() => {
           logger.warn(
             {
@@ -489,8 +486,7 @@ export function createReviewMessageWorkflow({
         activityId,
         review,
         statusMessage,
-        error,
-        modifyingRequestCreated
+        error
       );
     } finally {
       claimedMessageIds.delete(message.id);

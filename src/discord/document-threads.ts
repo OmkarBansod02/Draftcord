@@ -47,6 +47,14 @@ export function createDocumentThreadUrl(
   return `https://discord.com/channels/${encodeURIComponent(guildId)}/${encodeURIComponent(threadId)}`;
 }
 
+export function createDiscordMessageUrl(
+  guildId: string,
+  threadId: string,
+  messageId: string
+): string {
+  return `${createDocumentThreadUrl(guildId, threadId)}/${encodeURIComponent(messageId)}`;
+}
+
 export function createWorkspaceWelcomeMessage({
   title,
   originalFilename,

@@ -15,6 +15,9 @@ export interface DiscordActionRow {
   components: DiscordButtonComponent[];
 }
 
+export const EXPORT_FORMATS = ["docx", "pdf"] as const;
+export type ExportFormat = (typeof EXPORT_FORMATS)[number];
+
 const MAX_DISCORD_CONTENT = 2_000;
 
 export function escapeDiscordMentions(value: string): string {
@@ -36,6 +39,17 @@ export function reviewCustomId(
 ): string {
   const customId = `draftcord:review:${decision}:${reviewId}`;
   if (customId.length > 100) throw new Error("Review custom ID exceeds 100 characters");
+  return customId;
+}
+
+export function exportCustomId(
+  format: ExportFormat,
+  documentId: string
+): string {
+  const customId = `draftcord:export:${format}:${documentId}`;
+  if (customId.length > 100) {
+    throw new Error("Export custom ID exceeds 100 characters");
+  }
   return customId;
 }
 
@@ -65,6 +79,49 @@ export function createModeComponents(
       }
     ]
   }];
+}
+
+export function createExportComponents(
+  documentId: string,
+  disabled = false
+): DiscordActionRow[] {
+  return [{
+    type: 1,
+    components: [
+      {
+        type: 2,
+        style: 2,
+        custom_id: exportCustomId("docx", documentId),
+        label: "Export DOCX",
+        emoji: { name: "📄" },
+        disabled
+      },
+      {
+        type: 2,
+        style: 2,
+        custom_id: exportCustomId("pdf", documentId),
+        label: "Export PDF",
+        emoji: { name: "🧾" },
+        disabled
+      }
+    ]
+  }];
+}
+
+/**
+ * The complete pair of rows used by a document workspace control message.
+ * `createModeComponents` remains a one-row compatibility helper for review
+ * messages and Phase 5 callers that only need mode controls.
+ */
+export function createWorkspaceControlComponents(
+  documentId: string,
+  activeMode: EditMode,
+  disabled = false
+): DiscordActionRow[] {
+  return [
+    ...createModeComponents(documentId, activeMode, disabled),
+    ...createExportComponents(documentId, disabled)
+  ];
 }
 
 export function createReviewDecisionComponents(

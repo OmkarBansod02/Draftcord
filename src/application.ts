@@ -19,6 +19,13 @@ import { createSuperDocsReviewClient } from "./superdocs/review-client.js";
 import { createComponentInteractionHandler } from "./discord/component-interactions.js";
 import { reconcilePendingReviews } from "./documents/review-recovery.js";
 import { createDiscordRestClient } from "./discord/api.js";
+import { createSuperDocsExportClient } from "./superdocs/export-client.js";
+import { createExportActivityRepository } from "./documents/export-activity.js";
+import {
+  createDocumentExportWorkflow,
+  parseMaxExportBytes
+} from "./documents/export-workflow.js";
+import { reconcileStaleExports } from "./documents/export-recovery.js";
 
 function requireEnvironment(): {
   publicKey: string;
@@ -68,6 +75,7 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
     throw new Error("PORT must be an integer between 0 and 65535");
   }
+  const maxExportBytes = parseMaxExportBytes();
 
   const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
   const defaultEditMode = parseDefaultEditMode();
@@ -91,6 +99,7 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
   const registry = createDocumentWorkspaceRegistry({ storage, logger });
   await registry.refresh();
   const activity = createEditActivityRepository({ storage, logger });
+  const exportActivity = createExportActivityRepository({ storage, logger });
   const reviewStore = createReviewStore({ storage, logger });
   const queue = createDocumentEditQueue({ maxPendingEdits: 5 });
   const superdocsClient = createSuperDocsClient({
@@ -104,12 +113,38 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
   const discordClient = createDiscordRestClient({
     botToken: environment.botToken
   });
+  const superdocsExportClient = createSuperDocsExportClient({
+    ...superdocsConfig,
+    logger
+  });
   await reconcilePendingReviews({
     storage,
     registry,
     reviewStore,
     reviewClient: superdocsReviewClient,
     logger
+  });
+  await reconcileStaleExports({
+    storage,
+    registry,
+    reviewStore,
+    logger
+  });
+  const exportWorkflow = createDocumentExportWorkflow({
+    config: {
+      applicationId: environment.applicationId,
+      ownerUserId: environment.ownerUserId,
+      guildId: environment.guildId
+    },
+    logger,
+    storage,
+    registry,
+    reviewStore,
+    activity: exportActivity,
+    exportClient: superdocsExportClient,
+    discordClient,
+    editQueue: queue,
+    maxExportBytes
   });
   const componentHandler = createComponentInteractionHandler({
     config: {
@@ -123,7 +158,8 @@ export async function startDraftcord(): Promise<{ stop(): Promise<void> }> {
     reviewStore,
     activity,
     reviewClient: superdocsReviewClient,
-    discordClient
+    discordClient,
+    exportWorkflow
   });
 
   const app = express();

@@ -20,6 +20,10 @@ export interface DiscordInteraction {
   token?: string;
   guild_id?: string;
   channel_id?: string;
+  attachment_size_limit?: number;
+  guild?: {
+    attachment_size_limit?: number;
+  };
   member?: {
     user?: {
       id?: string;
@@ -32,6 +36,7 @@ export interface DiscordInteraction {
     name?: string;
     custom_id?: string;
     component_type?: number;
+    attachment_size_limit?: number;
     options?: DiscordInteractionOption[];
     resolved?: {
       attachments?: Record<string, DiscordAttachment>;
@@ -39,6 +44,7 @@ export interface DiscordInteraction {
   };
   message?: {
     id?: string;
+    attachment_size_limit?: number;
   };
 }
 

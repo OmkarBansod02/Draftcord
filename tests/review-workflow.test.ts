@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -12,7 +12,10 @@ import { createDocumentEditQueue } from "../src/documents/edit-queue.js";
 import { createDocumentStorage } from "../src/documents/document-storage.js";
 import { createReviewStore } from "../src/documents/review-store.js";
 import { createDocumentWorkspaceRegistry } from "../src/documents/workspace-registry.js";
-import type { SuperDocsReviewClient } from "../src/superdocs/review-client.js";
+import {
+  SuperDocsReviewError,
+  type SuperDocsReviewClient
+} from "../src/superdocs/review-client.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -60,18 +63,19 @@ async function harness() {
     }))
   };
   const editDocument = vi.fn(async () => ({ response: "wrong path" }));
+  const activity = createEditActivityRepository({ storage, logger });
   const handler = createDocumentMessageHandler({
     config: { guildId: "guild-1", ownerUserId: "owner-1" },
     logger,
     storage,
     registry,
-    activity: createEditActivityRepository({ storage, logger }),
+    activity,
     queue,
     superdocsClient: { editDocument },
     reviewStore,
     reviewClient
   });
-  return { storage, queue, reviewStore, reviewClient, editDocument, handler };
+  return { root, storage, queue, reviewStore, reviewClient, editDocument, activity, handler };
 }
 
 function message(overrides: Record<string, unknown> = {}) {
@@ -137,11 +141,26 @@ describe("review-mode Discord message workflow", () => {
     expect(JSON.stringify(pending)).not.toContain("<p>");
     const proposal = (item.edit.mock.calls as unknown[][]).at(-1)?.[0] as {
       content: string;
+      components: Array<{ components: Array<{ label: string }> }>;
     };
     expect(proposal.content).toContain("Changes ready for review");
     expect(proposal.content).toContain("＠everyone");
     expect(proposal.content).not.toContain("opaque-job");
     expect(proposal.content.length).toBeLessThanOrEqual(2_000);
+    expect(proposal.components[0]?.components.map((button) => button.label)).toEqual([
+      "Approve All",
+      "Reject All"
+    ]);
+    expect(test.reviewClient.decideReview).not.toHaveBeenCalled();
+    expect((await test.reviewStore.read("document-1"))?.status).not.toBe(
+      "decision_processing"
+    );
+    const activityText = await readFile(
+      path.join(test.root, "documents", "document-1", "activity.jsonl"),
+      "utf8"
+    );
+    expect(activityText).toContain('"status":"proposal_ready"');
+    expect(activityText).not.toContain('"status":"ambiguous"');
   });
 
   it("blocks later edits while approval is pending", async () => {
@@ -179,7 +198,9 @@ describe("review-mode Discord message workflow", () => {
       editCount: 0,
       lastReviewErrorCategory: "continue_prompt_unsupported"
     });
-    expect((await test.reviewStore.read("document-1"))?.status).toBe("ambiguous");
+    expect((await test.reviewStore.read("document-1"))?.status).toBe(
+      "reconciliation_required"
+    );
     const pausedMessage = (item.edit.mock.calls as unknown[][]).at(-1)?.[0] as {
       content: string;
     };
@@ -194,5 +215,29 @@ describe("review-mode Discord message workflow", () => {
     };
     expect(blockedMessage.content).toContain("investigated manually");
     expect(test.reviewClient.startReview).toHaveBeenCalledOnce();
+  });
+
+  it("classifies proposal polling failure as review_failed without entering decision handling", async () => {
+    const test = await harness();
+    vi.mocked(test.reviewClient.pollJob).mockRejectedValueOnce(
+      new SuperDocsReviewError("review_poll_network", "temporary GET failure")
+    );
+    const item = message();
+    test.handler(item.value);
+    await test.queue.waitForIdle(1_000);
+
+    expect(await test.storage.readMetadata("document-1")).toMatchObject({
+      status: "review_failed",
+      lastReviewErrorCategory: "review_poll_network",
+      editCount: 0
+    });
+    expect((await test.reviewStore.read("document-1"))?.status).toBe("failed");
+    expect(test.reviewClient.decideReview).not.toHaveBeenCalled();
+    const failure = (item.edit.mock.calls as unknown[][]).at(-1)?.[0] as {
+      content: string;
+    };
+    expect(failure.content).toContain("could not prepare a safe review proposal");
+    expect(failure.content).not.toContain("decision outcome");
+    expect(failure.content).not.toContain("uncertain");
   });
 });

@@ -4,7 +4,7 @@ import type { DiscordComponentMessageClient } from "../discord/api.js";
 import {
   disabledDecisionMessage,
   formatReviewProposal,
-  createModeComponents
+  createWorkspaceControlComponents
 } from "../discord/review-components.js";
 import { createWorkspaceWelcomeMessage } from "../discord/document-threads.js";
 import {
@@ -31,7 +31,7 @@ export interface ReviewDecisionContext {
   channelId: string;
   messageId: string;
   userId: string;
-  interactionId?: string;
+  interactionId: string;
 }
 
 function decisionValue(decision: "approve" | "reject"): ReviewDecision {
@@ -45,7 +45,7 @@ function terminalResult(review: PendingReview): string {
   if (["approved", "rejected", "completed"].includes(review.status)) {
     return "That review has already been resolved.";
   }
-  if (["expired", "failed", "ambiguous"].includes(review.status)) {
+  if (["expired", "failed", "ambiguous", "reconciliation_required"].includes(review.status)) {
     return "That review control is no longer active.";
   }
   return "That review is not ready for a decision.";
@@ -100,12 +100,15 @@ export function createReviewDecisionProcessor({
         chunkCount: metadata.superdocsChunkCount,
         editMode: metadata.editMode
       }),
-      createModeComponents(metadata.documentId, metadata.editMode)
+      createWorkspaceControlComponents(metadata.documentId, metadata.editMode)
     ).catch(() => undefined);
   }
 
   return {
     async process(context) {
+      if (!context.interactionId.trim()) {
+        return "That review decision is missing its Discord interaction identity.";
+      }
       const review = await reviewStore.find(context.reviewId);
       if (!review) return "That review control is invalid or no longer available.";
       const metadata = await storage.readMetadata(review.documentId).catch(() => undefined);
@@ -133,6 +136,9 @@ export function createReviewDecisionProcessor({
           "Duplicate review decision ignored"
         );
         return terminalResult(review);
+      }
+      if (metadata.status === "exporting") {
+        return "The document is currently being exported. Try this decision again after the export finishes.";
       }
       if (
         metadata.pendingReviewId !== review.reviewId ||
@@ -169,7 +175,8 @@ export function createReviewDecisionProcessor({
           ...review,
           status: "decision_processing",
           decision,
-          decidedAt
+          decidedAt,
+          decisionInteractionId: context.interactionId
         }, ["pending"]);
       } catch {
         locks.delete(metadata.documentId);
@@ -210,7 +217,8 @@ export function createReviewDecisionProcessor({
           ...claimed,
           status: "pending",
           decision: undefined,
-          decidedAt: undefined
+          decidedAt: undefined,
+          decisionInteractionId: undefined
         }, ["decision_processing"]).catch(() => undefined);
         const restored = await storage.updateMetadata(metadata.documentId, {
           status: "awaiting_approval",
@@ -255,6 +263,7 @@ export function createReviewDecisionProcessor({
             proposedChanges: changes,
             decision: undefined,
             decidedAt: undefined,
+            decisionInteractionId: undefined,
             safeErrorCategory: undefined,
             expiresAt: new Date(Date.now() + 55 * 60_000).toISOString()
           }, ["decision_processing"]);
@@ -282,7 +291,8 @@ export function createReviewDecisionProcessor({
             status: "proposal_ready",
             createdAt: nextRound.createdAt,
             changesSummary: `${changes.length} proposed change${changes.length === 1 ? "" : "s"}`,
-            changedSectionCount: changes.length
+            changedSectionCount: changes.length,
+            discordInteractionId: context.interactionId
           });
           logger.info(
             {
@@ -348,7 +358,8 @@ export function createReviewDecisionProcessor({
           decision,
           changesSummary: summary,
           changedSectionCount:
-            context.decision === "approve" ? claimed.changeIds.length : 0
+            context.decision === "approve" ? claimed.changeIds.length : 0,
+          discordInteractionId: context.interactionId
         });
         const final = context.decision === "approve"
           ? [
@@ -401,25 +412,38 @@ export function createReviewDecisionProcessor({
         const category = error instanceof SuperDocsReviewError
           ? error.category
           : "review_decision_unexpected";
-        const ambiguousDecisionRequest = [
+        const ambiguousDecisionRequest = !outboundSent && [
           "review_decision_timeout",
           "review_decision_network",
           "review_decision_server_error"
         ].includes(category);
-        const ambiguous = category === "continue_prompt_unsupported" ||
-          ambiguousDecisionRequest || (outboundSent &&
-          category !== "review_job_failed" &&
-          category !== "review_job_cancelled");
+        const knownTerminalJobFailure = [
+          "review_job_failed",
+          "review_job_cancelled"
+        ].includes(category);
+        const reconciliationRequired = !ambiguousDecisionRequest && (
+          category === "continue_prompt_unsupported" ||
+          (outboundSent && !knownTerminalJobFailure)
+        );
+        const persistedCategory = reconciliationRequired &&
+          category !== "continue_prompt_unsupported"
+          ? `review_reconciliation_${category.replace(/^review_/, "")}`
+          : category;
+        const failureStatus = ambiguousDecisionRequest
+          ? "ambiguous"
+          : reconciliationRequired
+            ? "reconciliation_required"
+            : "failed";
         await reviewStore.replace({
           ...claimed,
-          status: ambiguous ? "ambiguous" : "failed",
-          safeErrorCategory: category
+          status: failureStatus,
+          safeErrorCategory: persistedCategory
         }, ["decision_processing", "pending"]).catch(() => undefined);
         const failed = await storage.updateMetadata(metadata.documentId, {
           status: "review_failed",
           pendingReviewId: null,
           pendingReviewMessageId: null,
-          lastReviewErrorCategory: category
+          lastReviewErrorCategory: persistedCategory
         }).catch(() => undefined);
         if (failed) registry.register(failed);
         await activity.append(metadata.documentId, {
@@ -429,18 +453,25 @@ export function createReviewDecisionProcessor({
           discordMessageId: claimed.discordInstructionMessageId,
           discordThreadId: context.channelId,
           requestedByUserId: context.userId,
-          status: ambiguous ? "ambiguous" : "review_failed",
+          status: ambiguousDecisionRequest
+            ? "ambiguous"
+            : reconciliationRequired
+              ? "reconciliation_required"
+              : "review_failed",
           createdAt: claimed.createdAt,
           completedAt: new Date().toISOString(),
           decision,
-          errorCategory: category
+          errorCategory: persistedCategory,
+          discordInteractionId: context.interactionId
         }).catch(() => undefined);
         const payload = disabledDecisionMessage(
           category === "continue_prompt_unsupported"
             ? "⚠️ This large edit paused again. Continue controls are not supported, so Draftcord did not send another approval. Manual investigation is required."
-            : ambiguous
-            ? "⚠️ The review decision outcome is uncertain and will not be retried automatically. Manual investigation is required."
-            : "❌ The review decision could not be completed. No edit count was recorded."
+            : ambiguousDecisionRequest
+              ? "⚠️ The review decision request outcome is uncertain and will not be retried automatically. Manual investigation is required."
+              : reconciliationRequired
+                ? "⚠️ The review decision was submitted, but Draftcord could not confirm the resulting job state. No request was retried. Manual reconciliation is required."
+                : "❌ The review decision could not be completed. No edit count was recorded."
         );
         await discordClient.editThreadMessage(
           context.channelId,
@@ -455,13 +486,19 @@ export function createReviewDecisionProcessor({
             documentId: metadata.documentId,
             reviewId: review.reviewId,
             decision: context.decision,
-            errorCategory: category
+            interactionId: context.interactionId,
+            errorCategory: persistedCategory,
+            upstreamErrorCategory: category
           },
           "Review decision failed"
         );
-        return ambiguous
-          ? "The decision outcome is uncertain and requires manual investigation."
-          : "The review decision failed safely.";
+        if (ambiguousDecisionRequest) {
+          return "The decision request outcome is uncertain and requires manual investigation.";
+        }
+        if (reconciliationRequired) {
+          return "The decision was submitted, but its resulting job state could not be confirmed. Manual reconciliation is required.";
+        }
+        return "The review decision failed safely.";
       } finally {
         locks.delete(metadata.documentId);
       }

@@ -143,6 +143,26 @@ describe("SuperDocs async review client", () => {
     expect(pending.mock.calls.length).toBeLessThanOrEqual(3);
   });
 
+  it("retries transient read-only job polling without replaying a modifying request", async () => {
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        throw new TypeError("temporary network failure");
+      }
+      return json({ status: "completed" });
+    });
+    const sleep = vi.fn(async () => undefined);
+    await expect(client(fetchMock as unknown as typeof fetch, {
+      sleep,
+      pollIntervalMs: 1,
+      maxPollWaitMs: 100
+    }).pollJob("job")).resolves.toMatchObject({ status: "completed" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledOnce();
+    for (const call of fetchMock.mock.calls as unknown[][]) {
+      expect((call[1] as RequestInit).method).toBe("GET");
+    }
+  });
+
   it("does not retry an ambiguous decision timeout", async () => {
     const hanging = vi.fn(async (_url: string | URL | Request, init?: RequestInit) =>
       await new Promise<Response>((_resolve, reject) => {

@@ -66,6 +66,9 @@ function errorCategory(error: unknown): string {
 }
 
 function unavailableMessage(metadata: StoredDocumentMetadata): string {
+  if (metadata.status === "exporting") {
+    return "⏳ This document is currently being exported. Try the edit again after the export finishes.";
+  }
   if (!metadata.superdocsSessionId) {
     return "⚠️ This document workspace is missing its SuperDocs session mapping and cannot be edited.";
   }
@@ -477,6 +480,14 @@ export function createDocumentMessageHandler({
 
     const instruction = message.content.trim();
     if (!instruction) return;
+
+    if (metadata.status === "exporting") {
+      void safeReply(
+        message,
+        unavailableMessage(metadata)
+      ).catch(() => undefined);
+      return;
+    }
 
     if (metadata.editMode === "review") {
       if (!reviewWorkflow) {
